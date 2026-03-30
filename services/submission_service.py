@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
-from keyboards.moderation_inline import build_moderation_keyboard
-from services.preview_service import send_rendered_post
+from keyboards.moderation_main import build_moderation_main_keyboard
+from services.preview_service import send_media_content
 from utils.formatters import build_default_author_signature, format_moderation_card
 
 
@@ -12,78 +12,58 @@ async def check_rate_limit(database, settings, user_id: int) -> tuple[bool, int]
     if not last_created_at:
         return True, 0
 
-    try:
-        last_dt = datetime.fromisoformat(last_created_at)
-    except ValueError:
-        return True, 0
-
+    last_dt = datetime.fromisoformat(last_created_at.replace("Z", "+00:00"))
+    now = datetime.now(settings.timezone)
     if last_dt.tzinfo is None:
-        last_dt = last_dt.replace(tzinfo=timezone.utc)
+        last_dt = last_dt.replace(tzinfo=settings.timezone)
+    else:
+        last_dt = last_dt.astimezone(settings.timezone)
 
-    now = datetime.now(timezone.utc)
-    wait_until = last_dt + timedelta(seconds=settings.submission_cooldown_seconds)
-    if now >= wait_until:
-        return True, 0
-
-    wait_seconds = int((wait_until - now).total_seconds())
-    return False, max(wait_seconds, 1)
+    seconds_passed = int((now - last_dt).total_seconds())
+    remaining = settings.submission_cooldown_seconds - seconds_passed
+    return remaining <= 0, max(0, remaining)
 
 
-async def create_submission(
-    database,
-    user,
-    file_id: str | None,
-    text: str | None,
-    publish_as_author: bool,
-):
-    signature = None
-    anonymous = not publish_as_author
-
-    if publish_as_author:
-        signature = build_default_author_signature(
-            user_id=user.id,
-            username=user.username,
-            first_name=user.first_name,
-        )
-
-    return await database.create_submission(
-        user_id=user.id,
+async def create_submission(database, user, file_id: str, text: str, publish_as_author: bool, media_type: str = ""):
+    signature = build_default_author_signature(username=user.username, first_name=user.first_name, user_id=user.telegram_id) if publish_as_author else ""
+    post = await database.create_submission(
+        user_id=user.telegram_id,
         username=user.username,
         first_name=user.first_name,
-        original_text=text,
-        final_text=text,
-        file_id=file_id,
+        original_text=text or "",
+        final_text=text or "",
         signature=signature,
         base_signature=signature,
+        anonymous=not publish_as_author,
+        base_anonymous=not publish_as_author,
         is_admin_signature=False,
-        base_admin_signature=False,
-        anonymous=anonymous,
-        base_anonymous=anonymous,
+        file_id=file_id or "",
+        media_type=media_type or "",
         status="pending",
     )
+    await database.increment_user_submissions(user.telegram_id)
+    return await database.get_submission(post.id)
 
 
 async def deliver_submission_to_admin(bot, database, settings, post) -> None:
-    content_text = post.final_text or post.original_text
-    message_ids = await send_rendered_post(
-        bot=bot,
-        chat_id=settings.admin_chat_id,
+    source_message = await send_media_content(
+        bot,
+        settings.admin_chat_id,
         file_id=post.file_id,
-        text=content_text,
-        reply_markup=None,
+        media_type=post.media_type,
+        text=post.final_text or "",
     )
-    source_message_id = message_ids[0] if message_ids else None
 
     card_message = await bot.send_message(
         chat_id=settings.admin_chat_id,
         text=format_moderation_card(post, settings.timezone),
-        reply_markup=build_moderation_keyboard(post),
+        reply_markup=build_moderation_main_keyboard(post),
     )
 
     await database.set_admin_messages(
         post_id=post.id,
-        content_chat_id=settings.admin_chat_id,
-        content_message_id=source_message_id,
-        moderation_chat_id=settings.admin_chat_id,
-        moderation_message_id=card_message.message_id,
+        source_chat_id=source_message.chat.id if source_message else None,
+        source_message_id=source_message.message_id if source_message else None,
+        card_chat_id=card_message.chat.id,
+        card_message_id=card_message.message_id,
     )

@@ -257,3 +257,8 @@ async def reject_submission_callback(callback: CallbackQuery, callback_data: Mod
         post_id=callback_data.post_id,
         moderator_id=callback.from_user.id,
     )
+
+
+@router.callback_query(ModerationCallback.filter())
+async def moderation_fallback(callback: CallbackQuery) -> None:
+    await _safe_callback_answer(callback, "Кнопка устарела или действие больше недоступно")

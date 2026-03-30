@@ -26,11 +26,16 @@ def format_status(status: str) -> str:
 
 
 def content_type_label(post) -> str:
-    has_photo = bool(getattr(post, "file_id", ""))
+    media_type = normalize_text(getattr(post, "media_type", ""))
+    has_media = bool(getattr(post, "file_id", ""))
     has_text = bool(normalize_text(getattr(post, "final_text", None) or getattr(post, "original_text", None)))
-    if has_photo and has_text:
+    if media_type == "video" and has_text:
+        return "Видео + текст"
+    if media_type == "video":
+        return "Видео"
+    if has_media and has_text:
         return "Фото + текст"
-    if has_photo:
+    if has_media:
         return "Фото"
     return "Текст"
 

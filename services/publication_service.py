@@ -1,88 +1,59 @@
 from __future__ import annotations
 
-from datetime import datetime
-
-from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 
-from config import Settings
-from database import Database, SuggestedPost
 from keyboards.post_actions import build_post_actions_keyboard
 from services.preview_service import send_rendered_post
-from utils.formatters import compose_publication_text
 
 
-def _now_iso(settings: Settings) -> str:
-    return datetime.now(settings.timezone).isoformat()
+def _channel_targets(settings) -> list[int | str]:
+    targets: list[int | str] = []
+    if getattr(settings, "channel_id", None):
+        targets.append(settings.channel_id)
 
-
-def _extract_public_channel_username(channel_url: str | None) -> str | None:
-    value = (channel_url or "").strip()
-    if not value:
-        return None
-
-    if "t.me/" in value:
-        value = value.split("t.me/", maxsplit=1)[1]
-
-    value = value.strip().strip("/")
-    if not value or value.startswith("+"):
-        return None
-
-    return value if value.startswith("@") else f"@{value}"
-
-
-def _publication_targets(settings: Settings) -> list[int | str]:
-    targets: list[int | str] = [settings.channel_id]
-    public_username = _extract_public_channel_username(settings.channel_url)
-    if public_username and public_username != settings.channel_id:
-        targets.append(public_username)
+    channel_url = (getattr(settings, "channel_url", "") or "").strip()
+    if "t.me/" in channel_url:
+        username = channel_url.rsplit("/", 1)[-1].strip().removeprefix("@")
+        if username:
+            handle = f"@{username}"
+            if handle not in targets:
+                targets.append(handle)
     return targets
 
 
-async def publish_submission(
-    bot: Bot,
-    database: Database,
-    settings: Settings,
-    post: SuggestedPost,
-    moderator_id: int | None,
-    source_status: str | None = None,
-) -> tuple[bool, str]:
-    current_status = source_status or post.status
-    publication_text = compose_publication_text(post)
+async def publish_submission(bot, database, settings, post, moderator_id: int | None = None):
+    if not await database.start_publication(post.id):
+        return None
 
-    if current_status == "scheduled" and moderator_id is None:
-        claimed = await database.claim_scheduled_post(post.id)
-    else:
-        claimed = await database.start_publication(post.id, moderator_id or 0)
-
-    if not claimed:
-        return False, "Заявка уже обработана или недоступна для публикации."
+    previous_status = post.status
+    last_error = None
 
     try:
-        last_error: Exception | None = None
-
-        for target_chat in _publication_targets(settings):
+        target_message = None
+        for target in _channel_targets(settings):
             try:
-                await send_rendered_post(
-                    bot=bot,
-                    chat_id=target_chat,
-                    file_id=post.file_id,
-                    text=publication_text,
+                target_message = await send_rendered_post(
+                    bot,
+                    target,
+                    post,
                     reply_markup=build_post_actions_keyboard(),
                 )
-                last_error = None
                 break
             except TelegramBadRequest as error:
-                if "chat not found" in str(error).lower():
-                    last_error = error
-                    continue
-                raise
+                last_error = error
+                if "chat not found" not in str(error).lower():
+                    raise
 
-        if last_error is not None:
-            raise last_error
+        if target_message is None:
+            raise last_error or RuntimeError("Unable to publish post")
+
+        await database.finish_publication(post.id, moderator_id=moderator_id)
+        await database.set_admin_messages(
+            post_id=post.id,
+            source_chat_id=target_message.chat.id,
+            source_message_id=target_message.message_id,
+        )
+        return target_message
     except Exception:
-        await database.rollback_publication(post.id, restore_status=current_status)
+        await database.rollback_publication(post.id, previous_status=previous_status)
         raise
-
-    await database.finish_publication(post.id, published_at=_now_iso(settings))
-    return True, "Пост опубликован."

@@ -7,8 +7,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from keyboards.subscription import build_subscription_keyboard
 from keyboards.admin_menu import ADMIN_CANCEL_BUTTON, ADMIN_CLOSE_BUTTON
+from keyboards.subscription import build_subscription_keyboard
 from keyboards.user_flow import (
     CANCEL_BUTTON,
     SKIP_BUTTON,
@@ -29,7 +29,7 @@ _database = None
 _settings = None
 
 
-PHOTO_STEP_TEXT = "<b>Шаг 1 из 3 — фото</b>\n\nОтправь фото для поста 👇"
+MEDIA_STEP_TEXT = "<b>Шаг 1 из 3 — медиа</b>\n\nОтправь фото, видео или просто текст 👇"
 CAPTION_STEP_TEXT = "<b>Шаг 2 из 3 — подпись</b>\n\nОтправь подпись к посту или нажми <b>«Пропустить»</b>"
 PUBLISH_MODE_TEXT = "<b>Шаг 3 из 3 — формат публикации</b>\n\nВыбери, как опубликовать пост 👇"
 SUCCESS_TEXT = "<b>✅ Предложка отправлена</b>\n\n<i>Мы передали её на модерацию</i>"
@@ -69,26 +69,16 @@ async def _clear_prompt_messages(
     summary_message_id = data.get("summary_message_id")
     chat_id = incoming_message.chat.id if incoming_message else data.get("chat_id")
 
-    if chat_id and prompt_message_id:
+    if chat_id and prompt_message_id and incoming_message is not None:
         try:
-            await (incoming_message.bot if incoming_message else None).delete_message(
-                chat_id=chat_id,
-                message_id=prompt_message_id,
-            )
+            await incoming_message.bot.delete_message(chat_id=chat_id, message_id=prompt_message_id)
         except TelegramBadRequest:
-            pass
-        except AttributeError:
             pass
 
-    if chat_id and summary_message_id:
+    if chat_id and summary_message_id and incoming_message is not None:
         try:
-            await (incoming_message.bot if incoming_message else None).delete_message(
-                chat_id=chat_id,
-                message_id=summary_message_id,
-            )
+            await incoming_message.bot.delete_message(chat_id=chat_id, message_id=summary_message_id)
         except TelegramBadRequest:
-            pass
-        except AttributeError:
             pass
 
     if incoming_message is not None and delete_incoming:
@@ -103,8 +93,8 @@ async def _send_main_menu(message: Message, state: FSMContext, text: str = CANCE
     await message.answer(text, reply_markup=_main_menu(message.from_user.id))
 
 
-async def _send_photo_step(message: Message, state: FSMContext) -> None:
-    prompt = await message.answer(PHOTO_STEP_TEXT, reply_markup=build_photo_step_keyboard())
+async def _send_media_step(message: Message, state: FSMContext) -> None:
+    prompt = await message.answer(MEDIA_STEP_TEXT, reply_markup=build_photo_step_keyboard())
     await state.update_data(chat_id=message.chat.id, prompt_message_id=prompt.message_id, summary_message_id=None)
 
 
@@ -113,12 +103,18 @@ async def _send_caption_step(message: Message, state: FSMContext) -> None:
     await state.update_data(chat_id=message.chat.id, prompt_message_id=prompt.message_id)
 
 
-def _build_summary_text(caption: str, publish_as_author: bool) -> str:
+def _build_summary_text(media_type: str, caption: str, publish_as_author: bool) -> str:
     caption_text = html.escape(caption) if caption else "без подписи"
+    if media_type == "video":
+        media_text = "✅ видео"
+    elif media_type == "photo":
+        media_text = "✅ фото"
+    else:
+        media_text = "✅ только текст"
     mode_text = "от автора" if publish_as_author else "анонимно"
     return (
         "<b>Проверь предложку:</b>\n\n"
-        "<b>Фото:</b> ✅\n"
+        f"<b>Медиа:</b> {media_text}\n"
         f"<b>Подпись:</b> {caption_text}\n"
         f"<b>Формат:</b> {mode_text}"
     )
@@ -126,7 +122,7 @@ def _build_summary_text(caption: str, publish_as_author: bool) -> str:
 
 async def _show_confirmation(callback: CallbackQuery, state: FSMContext, publish_as_author: bool) -> None:
     data = await state.get_data()
-    summary_text = _build_summary_text(data.get("caption", ""), publish_as_author)
+    summary_text = _build_summary_text(data.get("media_type", "photo"), data.get("caption", ""), publish_as_author)
     await state.update_data(publish_as_author=publish_as_author)
     try:
         await callback.message.edit_text(summary_text, reply_markup=build_confirmation_keyboard())
@@ -163,7 +159,7 @@ async def start_submission(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await state.set_state(SubmissionStates.waiting_for_photo)
-    await _send_photo_step(message, state)
+    await _send_media_step(message, state)
 
 
 @router.message(F.text.in_({CANCEL_BUTTON, ADMIN_CANCEL_BUTTON, ADMIN_CLOSE_BUTTON}))
@@ -171,22 +167,54 @@ async def cancel_any_flow(message: Message, state: FSMContext) -> None:
     await _send_main_menu(message, state)
 
 
-@router.message(SubmissionStates.waiting_for_photo, F.photo)
-async def save_photo(message: Message, state: FSMContext) -> None:
+@router.message(SubmissionStates.waiting_for_photo, F.photo | F.video)
+async def save_media(message: Message, state: FSMContext) -> None:
     await _clear_prompt_messages(state, message)
+    media_type = "video" if message.video else "photo"
+    file_id = message.video.file_id if message.video else message.photo[-1].file_id
+    caption = (message.caption or "").strip()
+
     await state.update_data(
-        photo_file_id=message.photo[-1].file_id,
-        caption="",
+        file_id=file_id,
+        media_type=media_type,
+        caption=caption,
         publish_as_author=False,
         chat_id=message.chat.id,
     )
+
+    if caption:
+        await state.set_state(SubmissionStates.waiting_for_publish_mode)
+        summary = await message.answer(PUBLISH_MODE_TEXT, reply_markup=build_publish_mode_keyboard())
+        await state.update_data(summary_message_id=summary.message_id, chat_id=message.chat.id)
+        return
+
     await state.set_state(SubmissionStates.waiting_for_caption)
     await _send_caption_step(message, state)
 
 
+@router.message(SubmissionStates.waiting_for_photo, F.text)
+async def save_text_only(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await _send_media_step(message, state)
+        return
+
+    await _clear_prompt_messages(state, message)
+    await state.update_data(
+        file_id="",
+        media_type="",
+        caption=text,
+        publish_as_author=False,
+        chat_id=message.chat.id,
+    )
+    await state.set_state(SubmissionStates.waiting_for_publish_mode)
+    summary = await message.answer(PUBLISH_MODE_TEXT, reply_markup=build_publish_mode_keyboard())
+    await state.update_data(summary_message_id=summary.message_id, chat_id=message.chat.id)
+
+
 @router.message(SubmissionStates.waiting_for_photo)
-async def invalid_photo(message: Message, state: FSMContext) -> None:
-    await _send_photo_step(message, state)
+async def invalid_media(message: Message, state: FSMContext) -> None:
+    await _send_media_step(message, state)
 
 
 @router.message(SubmissionStates.waiting_for_caption, F.text == SKIP_BUTTON)
@@ -238,8 +266,8 @@ async def choose_anonymous_mode(callback: CallbackQuery, state: FSMContext) -> N
 async def restart_submission(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SubmissionStates.waiting_for_photo)
-    await callback.message.delete()
-    await _send_photo_step(callback.message, state)
+    await _safe_delete(callback.message)
+    await _send_media_step(callback.message, state)
     await callback.answer()
 
 
@@ -266,14 +294,23 @@ async def confirm_submission(callback: CallbackQuery, state: FSMContext) -> None
         pass
 
     data = await state.get_data()
-    user, _ = await register_user(_database, _settings, callback.from_user)
+    file_id = data.get("file_id", "")
+    media_type = data.get("media_type", "")
     text = data.get("caption", "")
+
+    if not file_id and not text:
+        await state.clear()
+        await callback.message.answer("Нельзя отправить пустую предложку.", reply_markup=_main_menu(callback.from_user.id))
+        return
+
+    user, _ = await register_user(_database, _settings, callback.from_user)
     post = await create_submission(
         _database,
         user,
-        data["photo_file_id"],
+        file_id,
         text,
         bool(data.get("publish_as_author")),
+        media_type,
     )
     await deliver_submission_to_admin(callback.bot, _database, _settings, post)
 
