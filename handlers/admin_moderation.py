@@ -9,8 +9,17 @@ from aiogram.types import CallbackQuery, Message
 from keyboards.moderation_edit import build_moderation_edit_keyboard
 from keyboards.moderation_inline import build_edit_cancel_keyboard
 from keyboards.moderation_main import ModerationCallback, build_moderation_main_keyboard
-from services.moderation_service import publish_post, reject_post
-from utils.formatters import format_moderation_card
+from services.moderation_service import (
+    clear_signature,
+    preview_post,
+    publish_post,
+    refresh_moderation_card,
+    reject_post,
+    reset_post,
+    toggle_anonymous,
+    update_signature,
+    update_text,
+)
 
 router = Router(name="admin_moderation")
 
@@ -32,19 +41,14 @@ def get_router(database=None, settings=None):
     return router
 
 
-async def _safe_callback_answer(
-    callback: CallbackQuery,
-    text: str | None = None,
-    *,
-    show_alert: bool = False,
-) -> None:
+async def _safe_answer(callback: CallbackQuery, text: str | None = None, *, show_alert: bool = False) -> None:
     try:
         await callback.answer(text=text, show_alert=show_alert)
     except TelegramBadRequest:
         pass
 
 
-async def _safe_delete_message(bot, chat_id: int | None, message_id: int | None) -> None:
+async def _safe_delete(bot, chat_id: int | None, message_id: int | None) -> None:
     if not chat_id or not message_id:
         return
     try:
@@ -53,7 +57,7 @@ async def _safe_delete_message(bot, chat_id: int | None, message_id: int | None)
         pass
 
 
-async def _sync_current_card(callback: CallbackQuery, post_id: int) -> None:
+async def _remember_card(callback: CallbackQuery, post_id: int) -> None:
     await _database.set_admin_messages(
         post_id=post_id,
         moderation_chat_id=callback.message.chat.id,
@@ -61,37 +65,15 @@ async def _sync_current_card(callback: CallbackQuery, post_id: int) -> None:
     )
 
 
-def _menu_markup(post, menu: str):
-    if menu == "edit":
-        return build_moderation_edit_keyboard(post)
-    return build_moderation_main_keyboard(post)
-
-
-async def _refresh_card(post_id: int, bot, *, menu: str) -> None:
+async def _switch_markup(callback: CallbackQuery, post_id: int, *, edit_mode: bool) -> None:
     post = await _database.get_submission(post_id)
-    if not post or not post.moderation_chat_id or not post.moderation_message_id:
+    if not post:
         return
-
-    text = format_moderation_card(post, _settings.timezone)
-    markup = _menu_markup(post, menu)
-
+    markup = build_moderation_edit_keyboard(post) if edit_mode else build_moderation_main_keyboard(post)
     try:
-        await bot.edit_message_text(
-            chat_id=post.moderation_chat_id,
-            message_id=post.moderation_message_id,
-            text=text,
-            reply_markup=markup,
-        )
-    except TelegramBadRequest as error:
-        if "message is not modified" in str(error).lower():
-            try:
-                await bot.edit_message_reply_markup(
-                    chat_id=post.moderation_chat_id,
-                    message_id=post.moderation_message_id,
-                    reply_markup=markup,
-                )
-            except TelegramBadRequest:
-                pass
+        await callback.message.edit_reply_markup(reply_markup=markup)
+    except TelegramBadRequest:
+        await refresh_moderation_card(callback.bot, _settings, post)
 
 
 async def _open_prompt(
@@ -100,10 +82,10 @@ async def _open_prompt(
     *,
     post_id: int,
     target_state,
-    prompt_text: str,
     field_name: str,
+    prompt_text: str,
 ) -> None:
-    await _sync_current_card(callback, post_id)
+    await _remember_card(callback, post_id)
     await state.clear()
     await state.set_state(target_state)
     prompt = await callback.message.answer(
@@ -112,130 +94,177 @@ async def _open_prompt(
     )
     await state.update_data(
         post_id=post_id,
-        card_chat_id=callback.message.chat.id,
-        card_message_id=callback.message.message_id,
         prompt_chat_id=prompt.chat.id,
         prompt_message_id=prompt.message_id,
     )
-    await _safe_callback_answer(callback)
+    await _safe_answer(callback)
 
 
-async def _finish_edit(
-    message: Message,
-    state: FSMContext,
-    *,
-    post_id: int,
-    menu: str = "edit",
-) -> None:
+async def _finish_prompt(message: Message, state: FSMContext, *, post_id: int) -> None:
     data = await state.get_data()
-    await _safe_delete_message(message.bot, data.get("prompt_chat_id"), data.get("prompt_message_id"))
-    await _safe_delete_message(message.bot, message.chat.id, message.message_id)
+    await _safe_delete(message.bot, data.get("prompt_chat_id"), data.get("prompt_message_id"))
+    await _safe_delete(message.bot, message.chat.id, message.message_id)
     await state.clear()
-    await _refresh_card(post_id, message.bot, menu=menu)
+    post = await _database.get_submission(post_id)
+    await refresh_moderation_card(message.bot, _settings, post)
+    if post and post.moderation_chat_id and post.moderation_message_id:
+        try:
+            await message.bot.edit_message_reply_markup(
+                chat_id=post.moderation_chat_id,
+                message_id=post.moderation_message_id,
+                reply_markup=build_moderation_edit_keyboard(post),
+            )
+        except TelegramBadRequest:
+            pass
 
 
 @router.callback_query(ModerationCallback.filter(F.action == "edit_menu"))
 async def open_edit_menu(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
-    await _sync_current_card(callback, callback_data.post_id)
-    await _refresh_card(callback_data.post_id, callback.bot, menu="edit")
-    await _safe_callback_answer(callback)
+    await _remember_card(callback, callback_data.post_id)
+    await _switch_markup(callback, callback_data.post_id, edit_mode=True)
+    await _safe_answer(callback)
 
 
 @router.callback_query(ModerationCallback.filter(F.action == "back_main"))
-async def back_to_main_menu(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
+async def back_main(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     data = await state.get_data()
-    await _safe_delete_message(callback.bot, data.get("prompt_chat_id"), data.get("prompt_message_id"))
+    await _safe_delete(callback.bot, data.get("prompt_chat_id"), data.get("prompt_message_id"))
     await state.clear()
-    await _sync_current_card(callback, callback_data.post_id)
-    await _refresh_card(callback_data.post_id, callback.bot, menu="main")
-    await _safe_callback_answer(callback)
+    await _remember_card(callback, callback_data.post_id)
+    await _switch_markup(callback, callback_data.post_id, edit_mode=False)
+    await _safe_answer(callback)
 
 
 @router.callback_query(ModerationCallback.filter(F.action == "edit_text"))
-async def start_text_edit(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
+async def start_edit_text(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     await _open_prompt(
         callback,
         state,
         post_id=callback_data.post_id,
         target_state=ModerationEditingStates.waiting_for_text,
-        prompt_text="Отправьте новый текст поста",
         field_name="text",
+        prompt_text="Отправьте новый текст поста",
     )
 
 
 @router.callback_query(ModerationCallback.filter(F.action == "edit_signature"))
-async def start_signature_edit(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
+async def start_edit_signature(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     await _open_prompt(
         callback,
         state,
         post_id=callback_data.post_id,
         target_state=ModerationEditingStates.waiting_for_signature,
-        prompt_text="Отправьте новую подпись",
         field_name="signature",
+        prompt_text="Отправьте новую подпись",
     )
 
 
-@router.callback_query(ModerationCallback.filter(F.action == "cancel_text"))
-@router.callback_query(ModerationCallback.filter(F.action == "cancel_signature"))
-async def cancel_edit_prompt(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
+@router.callback_query(ModerationCallback.filter(F.action.in_({"cancel_text", "cancel_signature"})))
+async def cancel_prompt(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     data = await state.get_data()
-    await _safe_delete_message(callback.bot, data.get("prompt_chat_id"), data.get("prompt_message_id"))
+    await _safe_delete(callback.bot, data.get("prompt_chat_id"), data.get("prompt_message_id"))
     await state.clear()
-    await _sync_current_card(callback, callback_data.post_id)
-    await _refresh_card(callback_data.post_id, callback.bot, menu="edit")
-    await _safe_callback_answer(callback)
+    await _remember_card(callback, callback_data.post_id)
+    await _switch_markup(callback, callback_data.post_id, edit_mode=True)
+    await _safe_answer(callback)
 
 
 @router.message(ModerationEditingStates.waiting_for_text, F.text)
-async def save_edited_text(message: Message, state: FSMContext) -> None:
+async def save_text_prompt(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     post_id = data["post_id"]
-    await _database.update_final_text(post_id=post_id, final_text=message.text.strip())
-    await _finish_edit(message, state, post_id=post_id, menu="edit")
+    await update_text(
+        bot=message.bot,
+        database=_database,
+        settings=_settings,
+        post_id=post_id,
+        text=message.text.strip(),
+    )
+    await _finish_prompt(message, state, post_id=post_id)
 
 
 @router.message(ModerationEditingStates.waiting_for_signature, F.text)
-async def save_edited_signature(message: Message, state: FSMContext) -> None:
+async def save_signature_prompt(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     post_id = data["post_id"]
-    signature = message.text.strip()
+    await update_signature(
+        bot=message.bot,
+        database=_database,
+        settings=_settings,
+        post_id=post_id,
+        signature=message.text.strip(),
+    )
+    await _finish_prompt(message, state, post_id=post_id)
 
-    await _database.update_signature(post_id=post_id, signature=signature)
-    await _database.set_admin_signature(post_id=post_id, is_admin_signature=bool(signature))
-    if signature:
-        await _database.set_anonymous(post_id=post_id, anonymous=False)
 
-    await _finish_edit(message, state, post_id=post_id, menu="edit")
-
-
-@router.callback_query(ModerationCallback.filter(F.action == "toggle_anonymous"))
-async def toggle_anonymous(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
-    await _sync_current_card(callback, callback_data.post_id)
+@router.callback_query(ModerationCallback.filter(F.action.in_({"toggle_anonymous", "anonymous"})))
+async def toggle_anonymous_callback(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
+    await _remember_card(callback, callback_data.post_id)
+    await toggle_anonymous(
+        bot=callback.bot,
+        database=_database,
+        settings=_settings,
+        post_id=callback_data.post_id,
+    )
     post = await _database.get_submission(callback_data.post_id)
-    if not post:
-        await _safe_callback_answer(callback)
-        return
-
-    new_value = not bool(post.anonymous)
-    await _database.set_anonymous(post_id=post.id, anonymous=new_value)
-    await _refresh_card(post.id, callback.bot, menu="edit")
-    await _safe_callback_answer(callback, "Анонимность обновлена")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=build_moderation_edit_keyboard(post))
+    except TelegramBadRequest:
+        pass
+    await _safe_answer(callback, "Анонимность обновлена")
 
 
-@router.callback_query(ModerationCallback.filter(F.action == "clear_signature"))
-async def clear_signature(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
-    await _sync_current_card(callback, callback_data.post_id)
-    await _database.update_signature(post_id=callback_data.post_id, signature="")
-    await _database.set_admin_signature(post_id=callback_data.post_id, is_admin_signature=False)
-    await _refresh_card(callback_data.post_id, callback.bot, menu="edit")
-    await _safe_callback_answer(callback, "Подпись убрана")
+@router.callback_query(ModerationCallback.filter(F.action.in_({"clear_signature", "remove_signature"})))
+async def clear_signature_callback(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
+    await _remember_card(callback, callback_data.post_id)
+    await clear_signature(
+        bot=callback.bot,
+        database=_database,
+        settings=_settings,
+        post_id=callback_data.post_id,
+    )
+    post = await _database.get_submission(callback_data.post_id)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=build_moderation_edit_keyboard(post))
+    except TelegramBadRequest:
+        pass
+    await _safe_answer(callback, "Подпись убрана")
+
+
+@router.callback_query(ModerationCallback.filter(F.action == "reset"))
+async def reset_post_callback(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
+    await _remember_card(callback, callback_data.post_id)
+    await reset_post(
+        bot=callback.bot,
+        database=_database,
+        settings=_settings,
+        post_id=callback_data.post_id,
+    )
+    post = await _database.get_submission(callback_data.post_id)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=build_moderation_edit_keyboard(post))
+    except TelegramBadRequest:
+        pass
+    await _safe_answer(callback, "Заявка сброшена")
+
+
+@router.callback_query(ModerationCallback.filter(F.action == "preview"))
+async def preview_callback(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
+    await _remember_card(callback, callback_data.post_id)
+    await preview_post(
+        bot=callback.bot,
+        database=_database,
+        settings=_settings,
+        post_id=callback_data.post_id,
+    )
+    await _safe_answer(callback, "Превью отправлено")
 
 
 @router.callback_query(ModerationCallback.filter(F.action == "publish"))
-async def publish_submission_callback(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
-    await _safe_callback_answer(callback, "Публикую…")
+async def publish_callback(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     await state.clear()
-    await _sync_current_card(callback, callback_data.post_id)
+    await _remember_card(callback, callback_data.post_id)
+    await _safe_answer(callback, "Публикую…")
     await publish_post(
         bot=callback.bot,
         database=_database,
@@ -246,10 +275,10 @@ async def publish_submission_callback(callback: CallbackQuery, callback_data: Mo
 
 
 @router.callback_query(ModerationCallback.filter(F.action == "reject"))
-async def reject_submission_callback(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
-    await _safe_callback_answer(callback, "Отклоняю…")
+async def reject_callback(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     await state.clear()
-    await _sync_current_card(callback, callback_data.post_id)
+    await _remember_card(callback, callback_data.post_id)
+    await _safe_answer(callback, "Отклоняю…")
     await reject_post(
         bot=callback.bot,
         database=_database,
@@ -261,4 +290,4 @@ async def reject_submission_callback(callback: CallbackQuery, callback_data: Mod
 
 @router.callback_query(ModerationCallback.filter())
 async def moderation_fallback(callback: CallbackQuery) -> None:
-    await _safe_callback_answer(callback, "Кнопка устарела или действие больше недоступно")
+    await _safe_answer(callback, "Кнопка устарела или действие больше недоступно")

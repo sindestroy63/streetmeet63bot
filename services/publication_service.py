@@ -21,11 +21,18 @@ def _channel_targets(settings) -> list[int | str]:
     return targets
 
 
-async def publish_submission(bot, database, settings, post, moderator_id: int | None = None):
+async def publish_submission(
+    bot,
+    database,
+    settings,
+    post,
+    moderator_id: int | None = None,
+    source_status: str | None = None,
+):
     if not await database.start_publication(post.id):
         return None
 
-    previous_status = post.status
+    previous_status = source_status or post.status
     last_error = None
 
     try:

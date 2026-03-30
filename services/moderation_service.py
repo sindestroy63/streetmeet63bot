@@ -1,217 +1,107 @@
 from __future__ import annotations
 
-import logging
-
-from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 
 from keyboards.moderation_inline import build_moderation_keyboard
+from services.preview_service import send_preview
 from services.publication_service import publish_submission
-from utils.formatters import build_signature_variants, format_moderation_card
-
-logger = logging.getLogger(__name__)
+from utils.formatters import format_moderation_card
 
 
-async def refresh_moderation_card(bot: Bot, settings, post) -> None:
-    card_chat_id = getattr(post, "admin_card_chat_id", None) or getattr(post, "card_chat_id", None)
-    card_message_id = getattr(post, "admin_card_message_id", None) or getattr(post, "card_message_id", None)
-
-    if not card_chat_id or not card_message_id:
+async def refresh_moderation_card(bot, settings, post) -> None:
+    if not post or not post.moderation_chat_id or not post.moderation_message_id:
         return
 
     try:
-        await bot.edit_message_caption(
-            chat_id=card_chat_id,
-            message_id=card_message_id,
-            caption=format_moderation_card(post, settings.timezone),
+        await bot.edit_message_text(
+            chat_id=post.moderation_chat_id,
+            message_id=post.moderation_message_id,
+            text=format_moderation_card(post, settings.timezone),
             reply_markup=build_moderation_keyboard(post),
         )
-    except Exception:
+    except TelegramBadRequest as error:
+        message = str(error).lower()
+        if "message is not modified" not in message:
+            return
         try:
-            await bot.edit_message_text(
-                chat_id=card_chat_id,
-                message_id=card_message_id,
-                text=format_moderation_card(post, settings.timezone),
+            await bot.edit_message_reply_markup(
+                chat_id=post.moderation_chat_id,
+                message_id=post.moderation_message_id,
                 reply_markup=build_moderation_keyboard(post),
             )
-        except Exception as error:
-            logger.warning(
-                "Failed to refresh moderation card chat_id=%s message_id=%s post_id=%s: %s",
-                card_chat_id,
-                card_message_id,
-                getattr(post, "id", None),
-                error,
-            )
+        except TelegramBadRequest:
             return
 
 
-async def notify_user(bot: Bot, post, text: str) -> None:
-    user_id = getattr(post, "user_id", None)
-    if not user_id:
+async def preview_post(*, bot, database, settings, post_id: int) -> None:
+    post = await database.get_submission(post_id)
+    if not post:
         return
-    try:
-        await bot.send_message(chat_id=user_id, text=text)
-    except Exception:
-        return
+    await send_preview(bot, settings.admin_chat_id, post)
 
 
-async def toggle_anonymous(*, bot: Bot, database, settings, post_id: int | None = None, post=None, **_kwargs):
-    resolved_post = post or (await database.get_post(post_id)) if post_id is not None else post
-    if resolved_post is None:
-        return False, "Заявка не найдена."
+async def publish_post(*, bot, database, settings, post_id: int | None = None, post=None, moderator_id: int = 0, **_kwargs):
+    target_post = post or (await database.get_submission(post_id)) if post_id is not None or post is not None else None
+    if not target_post:
+        return None
 
-    await database.set_anonymous(resolved_post.id, not resolved_post.anonymous)
-    updated_post = await database.get_post(resolved_post.id)
-    if updated_post is not None:
-        await refresh_moderation_card(bot, settings, updated_post)
-    return True, "Режим анонимности обновлён."
-
-
-async def reset_post(*, bot: Bot, database, settings, post_id: int | None = None, post=None, **_kwargs):
-    resolved_post = post or (await database.get_post(post_id)) if post_id is not None else post
-    if resolved_post is None:
-        return False, "Заявка не найдена."
-
-    await database.reset_post(resolved_post.id)
-    updated_post = await database.get_post(resolved_post.id)
-    if updated_post is not None:
-        await refresh_moderation_card(bot, settings, updated_post)
-    return True, "Изменения сброшены."
-
-
-async def apply_signature_variant(
-    *,
-    bot: Bot,
-    database,
-    settings,
-    post_id: int | None = None,
-    post=None,
-    variant: str,
-    **_kwargs,
-):
-    resolved_post = post or (await database.get_post(post_id)) if post_id is not None else post
-    if resolved_post is None:
-        return False, "Заявка не найдена."
-
-    variants = build_signature_variants(resolved_post)
-    signature = variants.get(variant)
-    if signature is None:
-        return False, "Неизвестный тип подписи."
-
-    await database.set_anonymous(resolved_post.id, False)
-    await database.set_admin_signature(resolved_post.id, False)
-    await database.update_signature(resolved_post.id, signature)
-    updated_post = await database.get_post(resolved_post.id)
-    if updated_post is not None:
-        await refresh_moderation_card(bot, settings, updated_post)
-    return True, "Подпись обновлена."
-
-
-async def clear_signature(*, bot: Bot, database, settings, post_id: int | None = None, post=None, **_kwargs):
-    resolved_post = post or (await database.get_post(post_id)) if post_id is not None else post
-    if resolved_post is None:
-        return False, "Заявка не найдена."
-
-    await database.update_signature(resolved_post.id, None)
-    await database.set_admin_signature(resolved_post.id, False)
-    updated_post = await database.get_post(resolved_post.id)
-    if updated_post is not None:
-        await refresh_moderation_card(bot, settings, updated_post)
-    return True, "Подпись удалена."
-
-
-async def update_text(
-    *,
-    bot: Bot,
-    database,
-    settings,
-    post_id: int | None = None,
-    post=None,
-    text: str | None = None,
-    **_kwargs,
-):
-    resolved_post = post or (await database.get_post(post_id)) if post_id is not None else post
-    if resolved_post is None:
-        return False, "Заявка не найдена."
-
-    await database.update_final_text(resolved_post.id, text)
-    updated_post = await database.get_post(resolved_post.id)
-    if updated_post is not None:
-        await refresh_moderation_card(bot, settings, updated_post)
-    return True, "Текст обновлён."
-
-
-async def update_signature(
-    *,
-    bot: Bot,
-    database,
-    settings,
-    post_id: int | None = None,
-    post=None,
-    signature: str | None = None,
-    **_kwargs,
-):
-    resolved_post = post or (await database.get_post(post_id)) if post_id is not None else post
-    if resolved_post is None:
-        return False, "Заявка не найдена."
-
-    await database.update_signature(resolved_post.id, signature)
-    updated_post = await database.get_post(resolved_post.id)
-    if updated_post is not None:
-        await refresh_moderation_card(bot, settings, updated_post)
-    return True, "Подпись обновлена."
-
-
-async def publish_post(
-    *,
-    bot: Bot,
-    database,
-    settings,
-    post_id: int | None = None,
-    post=None,
-    moderator_id: int = 0,
-    **_kwargs,
-):
-    resolved_post = post or (await database.get_post(post_id)) if post_id is not None else post
-    if resolved_post is None:
-        return False, "Заявка не найдена."
-
-    source_status = "scheduled" if getattr(resolved_post, "status", None) == "scheduled" else "pending"
-    ok, result_text = await publish_submission(
+    await publish_submission(
         bot=bot,
         database=database,
         settings=settings,
-        post=resolved_post,
+        post=target_post,
         moderator_id=moderator_id,
-        source_status=source_status,
+        source_status=target_post.status,
     )
 
-    updated_post = await database.get_post(resolved_post.id)
-    if updated_post is not None:
-        await refresh_moderation_card(bot, settings, updated_post)
-
-    return ok, result_text
+    refreshed = await database.get_submission(target_post.id)
+    await refresh_moderation_card(bot, settings, refreshed)
+    return refreshed
 
 
-async def reject_post(
-    *,
-    bot: Bot,
-    database,
-    settings,
-    post_id: int | None = None,
-    post=None,
-    moderator_id: int = 0,
-    **_kwargs,
-):
-    resolved_post = post or (await database.get_post(post_id)) if post_id is not None else post
-    if resolved_post is None:
-        return False, "Заявка не найдена."
+async def reject_post(*, bot, database, settings, post_id: int | None = None, post=None, moderator_id: int = 0, **_kwargs):
+    target_post = post or (await database.get_submission(post_id)) if post_id is not None or post is not None else None
+    if not target_post:
+        return None
 
-    changed = await database.reject_post(resolved_post.id, moderator_id)
-    if not changed:
-        return False, "Заявка уже обработана."
+    await database.reject_post(target_post.id, moderator_id=moderator_id)
+    refreshed = await database.get_submission(target_post.id)
+    await refresh_moderation_card(bot, settings, refreshed)
+    return refreshed
 
-    updated_post = await database.get_post(resolved_post.id)
-    if updated_post is not None:
-        await refresh_moderation_card(bot, settings, updated_post)
 
-    return True, "Заявка отклонена."
+async def toggle_anonymous(*, bot, database, settings, post_id: int) -> None:
+    post = await database.get_submission(post_id)
+    if not post:
+        return
+    await database.set_anonymous(post_id=post.id, anonymous=not bool(post.anonymous))
+    refreshed = await database.get_submission(post.id)
+    await refresh_moderation_card(bot, settings, refreshed)
+
+
+async def reset_post(*, bot, database, settings, post_id: int) -> None:
+    await database.reset_post(post_id)
+    refreshed = await database.get_submission(post_id)
+    await refresh_moderation_card(bot, settings, refreshed)
+
+
+async def clear_signature(*, bot, database, settings, post_id: int) -> None:
+    await database.update_signature(post_id=post_id, signature="")
+    await database.set_admin_signature(post_id=post_id, is_admin_signature=False)
+    refreshed = await database.get_submission(post_id)
+    await refresh_moderation_card(bot, settings, refreshed)
+
+
+async def update_text(*, bot, database, settings, post_id: int, text: str) -> None:
+    await database.update_final_text(post_id=post_id, final_text=text)
+    refreshed = await database.get_submission(post_id)
+    await refresh_moderation_card(bot, settings, refreshed)
+
+
+async def update_signature(*, bot, database, settings, post_id: int, signature: str) -> None:
+    await database.update_signature(post_id=post_id, signature=signature)
+    await database.set_admin_signature(post_id=post_id, is_admin_signature=bool(signature))
+    if signature:
+        await database.set_anonymous(post_id=post_id, anonymous=False)
+    refreshed = await database.get_submission(post_id)
+    await refresh_moderation_card(bot, settings, refreshed)
