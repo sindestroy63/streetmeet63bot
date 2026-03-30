@@ -249,7 +249,8 @@ class Database:
                 SELECT
                     COUNT(*) AS total,
                     SUM(CASE WHEN is_blocked = FALSE AND is_active = TRUE THEN 1 ELSE 0 END) AS active,
-                    SUM(CASE WHEN is_blocked = TRUE THEN 1 ELSE 0 END) AS blocked
+                    SUM(CASE WHEN is_blocked = TRUE THEN 1 ELSE 0 END) AS blocked,
+                    SUM(CASE WHEN created_at >= date_trunc('day', NOW()) THEN 1 ELSE 0 END) AS today
                 FROM users
                 """
             )
@@ -257,6 +258,7 @@ class Database:
             "total": int(row["total"] or 0),
             "active": int(row["active"] or 0),
             "blocked": int(row["blocked"] or 0),
+            "today": int(row["today"] or 0),
         }
 
     async def get_user_counts(self) -> dict[str, int]:
@@ -504,7 +506,8 @@ class Database:
                     SUM(CASE WHEN status = 'scheduled' THEN 1 ELSE 0 END) AS scheduled,
                     SUM(CASE WHEN status = 'publishing' THEN 1 ELSE 0 END) AS publishing,
                     SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published,
-                    SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+                    SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                    SUM(CASE WHEN created_at >= date_trunc('day', NOW()) THEN 1 ELSE 0 END) AS today
                 FROM submissions
                 """
             )
@@ -515,6 +518,7 @@ class Database:
             "publishing": int(row["publishing"] or 0),
             "published": int(row["published"] or 0),
             "rejected": int(row["rejected"] or 0),
+            "today": int(row["today"] or 0),
         }
 
     async def get_submission_counts(self) -> dict[str, int]:
@@ -528,8 +532,17 @@ class Database:
             )
         return self._row_to_participant(row)
 
-    async def upsert_giveaway_participant(self, telegram_id: int, username: str = "", first_name: str = "") -> GiveawayParticipant:
+    async def upsert_giveaway_participant(
+        self,
+        telegram_id: int,
+        username: str = "",
+        first_name: str = "",
+    ) -> tuple[GiveawayParticipant, bool]:
         async with self._require_pool().acquire() as conn:
+            existed = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM giveaway_participants WHERE telegram_id = $1)",
+                telegram_id,
+            )
             row = await conn.fetchrow(
                 """
                 INSERT INTO giveaway_participants (telegram_id, username, first_name, joined_at, is_winner)
@@ -544,7 +557,7 @@ class Database:
                 first_name or "",
                 _utc_now(),
             )
-        return self._row_to_participant(row)
+        return self._row_to_participant(row), not bool(existed)
 
     async def get_all_giveaway_participants(self) -> list[GiveawayParticipant]:
         async with self._require_pool().acquire() as conn:
