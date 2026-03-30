@@ -6,3 +6,6 @@ __pycache__/
 bot.db
 .idea/
 .vscode/
+*.db
+*.db-shm
+*.db-wal
