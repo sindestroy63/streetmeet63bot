@@ -1,15 +1,11 @@
-from __future__ import annotations
-
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 SKIP_BUTTON = "Пропустить"
 CANCEL_BUTTON = "❌ Отмена"
 
 
-class UserFlowCallback(CallbackData, prefix="uf"):
+class UserSubmissionCallback(CallbackData, prefix="user_submit"):
     action: str
 
 
@@ -17,7 +13,6 @@ def build_photo_step_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=CANCEL_BUTTON)]],
         resize_keyboard=True,
-        selective=True,
     )
 
 
@@ -28,23 +23,54 @@ def build_caption_step_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=CANCEL_BUTTON)],
         ],
         resize_keyboard=True,
-        selective=True,
     )
 
 
 def build_publish_mode_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="👤 От моего имени", callback_data=UserFlowCallback(action="mode_author").pack())
-    builder.button(text="🙈 Анонимно", callback_data=UserFlowCallback(action="mode_anonymous").pack())
-    builder.button(text="❌ Отмена", callback_data=UserFlowCallback(action="cancel").pack())
-    builder.adjust(1, 1, 1)
-    return builder.as_markup()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👤 От моего имени",
+                    callback_data=UserSubmissionCallback(action="mode_author").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🙈 Анонимно",
+                    callback_data=UserSubmissionCallback(action="mode_anonymous").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=UserSubmissionCallback(action="cancel").pack(),
+                )
+            ],
+        ]
+    )
 
 
-def build_summary_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Отправить", callback_data=UserFlowCallback(action="confirm").pack())
-    builder.button(text="✏️ Изменить", callback_data=UserFlowCallback(action="edit").pack())
-    builder.button(text="❌ Отмена", callback_data=UserFlowCallback(action="cancel").pack())
-    builder.adjust(1, 2)
-    return builder.as_markup()
+def build_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Отправить",
+                    callback_data=UserSubmissionCallback(action="confirm").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Изменить",
+                    callback_data=UserSubmissionCallback(action="restart").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=UserSubmissionCallback(action="cancel").pack(),
+                )
+            ],
+        ]
+    )

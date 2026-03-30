@@ -2,84 +2,118 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
 
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+def _parse_admin_ids(raw_value: str) -> tuple[int, ...]:
+    return tuple(int(item.strip()) for item in raw_value.split(",") if item.strip())
 
 
-def _parse_int_list(raw_value: str) -> tuple[int, ...]:
-    items = [item.strip() for item in raw_value.split(",") if item.strip()]
-    if not items:
-        raise ValueError("ADMIN_IDS must contain at least one Telegram user id.")
-    return tuple(int(item) for item in items)
+def _normalize_channel_reference(raw_value: str) -> int | str:
+    value = (raw_value or "").strip()
+    if not value:
+        raise ValueError("CHANNEL_ID is required")
+
+    if value.startswith("https://t.me/") or value.startswith("http://t.me/"):
+        value = value.split("t.me/", maxsplit=1)[1]
+
+    value = value.strip("/")
+
+    if value.startswith("@"):
+        return value
+
+    if value.lstrip("-").isdigit():
+        return int(value)
+
+    if value.replace("_", "").isalnum():
+        return f"@{value}"
+
+    raise ValueError(
+        "CHANNEL_ID must be a Telegram channel id (-100...) or @username or t.me link"
+    )
 
 
-@dataclass(slots=True, frozen=True)
+def _parse_draw_at(raw_value: str, tzinfo: ZoneInfo) -> datetime:
+    value = (raw_value or "").strip()
+    if not value:
+        value = "2026-04-05 18:00"
+
+    parsed = datetime.strptime(value, "%Y-%m-%d %H:%M")
+    return parsed.replace(tzinfo=tzinfo)
+
+
+@dataclass(slots=True)
 class Settings:
     bot_token: str
     admin_ids: tuple[int, ...]
     admin_chat_id: int
-    channel_id: int
+    channel_id: int | str
     channel_url: str
+    database_path: str
+    submission_cooldown_seconds: int
     timezone_name: str
     timezone: ZoneInfo
-    database_path: Path
-    submission_cooldown_seconds: int
+    giveaway_channel_1_url: str
+    giveaway_channel_2_url: str
+    giveaway_draw_at: datetime
+    giveaway_winners_count: int
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.admin_ids
 
 
 def load_settings() -> Settings:
+    load_dotenv()
+
     bot_token = os.getenv("BOT_TOKEN", "").strip()
-    admin_ids_raw = os.getenv("ADMIN_IDS", "").strip()
+    if not bot_token:
+        raise ValueError("BOT_TOKEN is required")
+
+    admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS", ""))
+
     admin_chat_id_raw = os.getenv("ADMIN_CHAT_ID", "").strip()
-    channel_id_raw = os.getenv("CHANNEL_ID", "").strip()
+    if not admin_chat_id_raw:
+        raise ValueError("ADMIN_CHAT_ID is required")
+
+    channel_raw = os.getenv("CHANNEL_ID", "").strip()
     channel_url = os.getenv("CHANNEL_URL", "").strip()
+
+    if not channel_raw and not channel_url:
+        raise ValueError("CHANNEL_ID is required")
+
     timezone_name = os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
-    database_path_raw = os.getenv("DATABASE_PATH", "bot.db").strip()
-    cooldown_raw = os.getenv("SUBMISSION_COOLDOWN_SECONDS", "180").strip()
-
-    missing = [
-        name
-        for name, value in (
-            ("BOT_TOKEN", bot_token),
-            ("ADMIN_IDS", admin_ids_raw),
-            ("ADMIN_CHAT_ID", admin_chat_id_raw),
-            ("CHANNEL_ID", channel_id_raw),
-            ("CHANNEL_URL", channel_url),
-        )
-        if not value
-    ]
-    if missing:
-        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
-
-    database_path = Path(database_path_raw)
-    if not database_path.is_absolute():
-        database_path = BASE_DIR / database_path
 
     try:
         timezone = ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError as exc:
+    except ZoneInfoNotFoundError as error:
         raise ValueError(
-            "Invalid TIMEZONE or missing timezone database. "
-            f"Current value: {timezone_name}. "
-            "Install dependencies from requirements.txt, including tzdata."
-        ) from exc
+            f"Unknown timezone '{timezone_name}'. Install tzdata and use a valid IANA timezone."
+        ) from error
 
     return Settings(
         bot_token=bot_token,
-        admin_ids=_parse_int_list(admin_ids_raw),
+        admin_ids=admin_ids,
         admin_chat_id=int(admin_chat_id_raw),
-        channel_id=int(channel_id_raw),
+        channel_id=_normalize_channel_reference(channel_raw or channel_url),
         channel_url=channel_url,
+        database_path=os.getenv("DATABASE_PATH", "bot.db").strip() or "bot.db",
+        submission_cooldown_seconds=int(
+            os.getenv("SUBMISSION_COOLDOWN_SECONDS", "180").strip() or "180"
+        ),
         timezone_name=timezone_name,
         timezone=timezone,
-        database_path=database_path,
-        submission_cooldown_seconds=max(1, int(cooldown_raw)),
+        giveaway_channel_1_url=os.getenv(
+            "GIVEAWAY_CHANNEL_1_URL", "https://t.me/streetmeet63"
+        ).strip(),
+        giveaway_channel_2_url=os.getenv(
+            "GIVEAWAY_CHANNEL_2_URL", "https://t.me/priora613"
+        ).strip(),
+        giveaway_draw_at=_parse_draw_at(
+            os.getenv("GIVEAWAY_DRAW_AT", "2026-04-05 18:00"),
+            timezone,
+        ),
+        giveaway_winners_count=int(os.getenv("GIVEAWAY_WINNERS_COUNT", "5").strip() or "5"),
     )

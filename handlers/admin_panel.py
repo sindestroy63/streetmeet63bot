@@ -2,40 +2,51 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from config import Settings
-from keyboards.admin_menu import (
-    ADMIN_CLOSE_BUTTON,
-    ADMIN_PANEL_BUTTON,
-    build_admin_menu_keyboard,
-)
-from keyboards.user_menu import build_user_menu_keyboard
-from utils.permissions import can_use_admin_messages
-from utils.texts import ADMIN_PANEL_TEXT, MAIN_MENU_TEXT
+from database import Database
+from keyboards.admin_menu import ADMIN_CLOSE_BUTTON, build_admin_menu
+from keyboards.user_menu import ADMIN_PANEL_BUTTON, build_user_menu
 
 
-def get_router(settings: Settings) -> Router:
-    router = Router(name="admin_panel")
+router = Router(name="admin_panel")
+_database: Database | None = None
+_settings: Settings | None = None
 
-    @router.message(StateFilter("*"), Command("admin"))
-    @router.message(StateFilter("*"), F.text == ADMIN_PANEL_BUTTON)
-    async def open_admin_panel(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-        await state.clear()
-        await message.answer(ADMIN_PANEL_TEXT, reply_markup=build_admin_menu_keyboard())
 
-    @router.message(StateFilter("*"), F.text == ADMIN_CLOSE_BUTTON)
-    async def close_admin_panel(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-        await state.clear()
-        await message.answer(
-            MAIN_MENU_TEXT,
-            reply_markup=build_user_menu_keyboard(is_admin=True),
-        )
-
+def get_router(database: Database | None = None, settings: Settings | None = None) -> Router:
+    global _database, _settings
+    if database is not None:
+        _database = database
+    if settings is not None:
+        _settings = settings
     return router
+
+
+def _is_admin(message: Message) -> bool:
+    return bool(_settings and message.from_user and _settings.is_admin(message.from_user.id))
+
+
+@router.message(Command("admin"))
+@router.message(F.text == ADMIN_PANEL_BUTTON)
+async def open_admin_panel(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message):
+        return
+    await state.clear()
+    await message.answer(
+        "<b>⚙️ Админ-панель</b>\n\nВыбери действие ниже 👇",
+        reply_markup=build_admin_menu(),
+    )
+
+
+@router.message(F.text == ADMIN_CLOSE_BUTTON)
+async def close_admin_panel(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message):
+        return
+    await state.clear()
+    await message.answer(
+        "<b>Главное меню</b>\n\nВыбери действие ниже 👇",
+        reply_markup=build_user_menu(is_admin=True),
+    )

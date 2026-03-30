@@ -1,181 +1,163 @@
 from __future__ import annotations
 
-from contextlib import suppress
+from datetime import datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from config import Settings
-from database import Database
-from keyboards.admin_menu import ADMIN_CANCEL_BUTTON, build_admin_cancel_keyboard
-from keyboards.schedule_inline import ScheduleCallback, build_schedule_menu_keyboard
+from keyboards.admin_menu import build_admin_cancel_keyboard
+from keyboards.moderation_main import ModerationCallback
+from keyboards.schedule_inline import ScheduleCallback, build_schedule_keyboard
+from keyboards.user_menu import build_user_menu
 from services.moderation_service import refresh_moderation_card
-from states.admin_states import AdminStates
-from utils.datetime_utils import format_datetime_display, is_future_datetime, parse_manual_datetime, quick_schedule_datetime
-from utils.permissions import can_use_admin_callbacks, can_use_admin_messages
-from utils.texts import (
-    SCHEDULE_CANCELLED_TEXT,
-    SCHEDULE_INVALID_FORMAT_TEXT,
-    SCHEDULE_MANUAL_TEXT,
-    SCHEDULE_MENU_TEXT,
-    SCHEDULE_NOT_FOUND_TEXT,
-    SCHEDULE_PAST_DATE_TEXT,
-    build_schedule_success_text,
-)
+
+router = Router(name="admin_scheduling")
+
+_database = None
+_settings = None
 
 
-def get_router(database: Database, settings: Settings) -> Router:
-    router = Router(name="admin_scheduling")
+class SchedulingStates(StatesGroup):
+    waiting_for_schedule_datetime = State()
 
-    @router.callback_query(ScheduleCallback.filter())
-    async def handle_schedule_callback(
-        callback: CallbackQuery,
-        callback_data: ScheduleCallback,
-        state: FSMContext,
-    ) -> None:
-        if not can_use_admin_callbacks(callback, settings):
-            await callback.answer("Недостаточно прав.", show_alert=True)
-            return
 
-        post = await database.get_post(callback_data.post_id)
-        if post is None:
-            await callback.answer("Заявка не найдена.", show_alert=True)
-            return
-
-        action = callback_data.action
-
-        if action == "open":
-            if post.status not in {"pending", "scheduled"}:
-                await callback.answer("Заявка уже обработана.", show_alert=True)
-                return
-            await callback.message.answer(
-                SCHEDULE_MENU_TEXT,
-                reply_markup=build_schedule_menu_keyboard(post.id),
-                reply_to_message_id=post.admin_card_message_id,
-            )
-            await callback.answer()
-            return
-
-        if action == "remove":
-            if post.status != "scheduled":
-                await callback.answer(SCHEDULE_NOT_FOUND_TEXT, show_alert=True)
-                return
-            changed = await database.unschedule_post(post.id)
-            if not changed:
-                await callback.answer(SCHEDULE_NOT_FOUND_TEXT, show_alert=True)
-                return
-            updated_post = await database.get_post(post.id)
-            if updated_post:
-                await refresh_moderation_card(callback.bot, settings, updated_post)
-            await callback.answer("✅ Планирование отменено")
-            return
-
-        if action == "cancel":
-            await callback.answer("Отменено.")
-            with suppress(TelegramBadRequest):
-                await callback.message.delete()
-            return
-
-        if action == "manual":
-            await _clear_existing_prompt(callback.bot, callback.message.chat.id, state)
-            await state.clear()
-            await state.set_state(AdminStates.waiting_for_schedule_datetime)
-            prompt_message = await callback.message.answer(
-                SCHEDULE_MANUAL_TEXT,
-                reply_markup=build_admin_cancel_keyboard(),
-            )
-            await state.update_data(post_id=post.id, prompt_message_id=prompt_message.message_id)
-            with suppress(TelegramBadRequest):
-                await callback.message.delete()
-            await callback.answer("Жду дату и время.")
-            return
-
-        if action not in {"plus_30", "plus_60", "today_18", "today_21", "tomorrow_12", "tomorrow_18"}:
-            await callback.answer()
-            return
-
-        if post.status not in {"pending", "scheduled"}:
-            await callback.answer("Заявка уже обработана.", show_alert=True)
-            return
-
-        scheduled_dt = quick_schedule_datetime(action, settings.timezone)
-        changed = await database.schedule_post(post.id, scheduled_dt.isoformat(), callback.from_user.id)
-        if not changed:
-            await callback.answer("Не удалось запланировать публикацию.", show_alert=True)
-            return
-
-        updated_post = await database.get_post(post.id)
-        if updated_post:
-            await refresh_moderation_card(callback.bot, settings, updated_post)
-        with suppress(TelegramBadRequest):
-            await callback.message.delete()
-        await callback.answer("✅ Запланировано")
-        return
-
-    @router.message(StateFilter(AdminStates.waiting_for_schedule_datetime), F.text == ADMIN_CANCEL_BUTTON)
-    async def cancel_schedule_input(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-        await _clear_existing_prompt(message.bot, message.chat.id, state)
-        with suppress(TelegramBadRequest):
-            await message.delete()
-        await state.clear()
-        await message.answer(SCHEDULE_CANCELLED_TEXT)
-
-    @router.message(StateFilter(AdminStates.waiting_for_schedule_datetime), F.text)
-    async def handle_manual_schedule_datetime(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-
-        data = await state.get_data()
-        post_id = data.get("post_id")
-        if post_id is None:
-            await _clear_existing_prompt(message.bot, message.chat.id, state)
-            await state.clear()
-            return
-
-        post = await database.get_post(post_id)
-        if post is None or post.status not in {"pending", "scheduled"}:
-            await _clear_existing_prompt(message.bot, message.chat.id, state)
-            await state.clear()
-            await message.answer("Заявка уже обработана.")
-            return
-
-        try:
-            scheduled_dt = parse_manual_datetime(message.text, settings.timezone)
-        except ValueError:
-            await message.answer(SCHEDULE_INVALID_FORMAT_TEXT, reply_markup=build_admin_cancel_keyboard())
-            return
-
-        if not is_future_datetime(scheduled_dt, settings.timezone):
-            await message.answer(SCHEDULE_PAST_DATE_TEXT, reply_markup=build_admin_cancel_keyboard())
-            return
-
-        changed = await database.schedule_post(post.id, scheduled_dt.isoformat(), message.from_user.id)
-        await _clear_existing_prompt(message.bot, message.chat.id, state)
-        with suppress(TelegramBadRequest):
-            await message.delete()
-        await state.clear()
-
-        if not changed:
-            await message.answer("Не удалось запланировать публикацию.")
-            return
-
-        updated_post = await database.get_post(post.id)
-        if updated_post:
-            await refresh_moderation_card(message.bot, settings, updated_post)
-        await message.answer(build_schedule_success_text(format_datetime_display(scheduled_dt.isoformat(), settings.timezone)))
-
+def get_router(database=None, settings=None):
+    global _database, _settings
+    if database is not None:
+        _database = database
+    if settings is not None:
+        _settings = settings
     return router
 
 
-async def _clear_existing_prompt(bot, chat_id: int, state: FSMContext) -> None:
+def _main_menu(user_id: int):
+    return build_user_menu(is_admin=_settings.is_admin(user_id))
+
+
+def _now():
+    return datetime.now(_settings.timezone)
+
+
+def _future_at(hour: int, minute: int, days: int = 0) -> datetime:
+    base = _now() + timedelta(days=days)
+    target = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if days == 0 and target <= _now():
+        target += timedelta(days=1)
+    return target
+
+
+def _preset_datetime(action: str) -> datetime | None:
+    current = _now()
+    mapping = {
+        "plus_30m": current + timedelta(minutes=30),
+        "plus_1h": current + timedelta(hours=1),
+        "today_18": _future_at(18, 0),
+        "today_21": _future_at(21, 0),
+        "tomorrow_12": _future_at(12, 0, days=1),
+        "tomorrow_18": _future_at(18, 0, days=1),
+    }
+    return mapping.get(action)
+
+
+async def _schedule_post(callback: CallbackQuery, post_id: int, scheduled_at: datetime) -> None:
+    await _database.schedule_post(
+        post_id=post_id,
+        scheduled_at=scheduled_at.isoformat(),
+        scheduled_by=callback.from_user.id,
+    )
+    post = await _database.get_submission(post_id)
+    if post:
+        await refresh_moderation_card(callback.bot, _settings, post)
+
+
+@router.callback_query(ModerationCallback.filter(F.action == "schedule"))
+async def open_schedule_menu(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
+    if not _settings.is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.message.edit_reply_markup(reply_markup=build_schedule_keyboard(callback_data.post_id))
+    await callback.answer()
+
+
+@router.callback_query(ScheduleCallback.filter(F.action == "cancel"))
+async def cancel_schedule(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await callback.message.answer("❌ Планирование отменено", reply_markup=_main_menu(callback.from_user.id))
+    await callback.answer()
+
+
+@router.callback_query(ScheduleCallback.filter(F.action == "manual"))
+async def request_manual_datetime(callback: CallbackQuery, callback_data: ScheduleCallback, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(SchedulingStates.waiting_for_schedule_datetime)
+    await state.update_data(post_id=callback_data.post_id)
+    await callback.message.answer(
+        "<b>Введи дату и время публикации</b>\n\n"
+        "Формат: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
+        "Пример: <code>05.04.2026 18:00</code>",
+        reply_markup=build_admin_cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(ScheduleCallback.filter())
+async def apply_schedule_preset(callback: CallbackQuery, callback_data: ScheduleCallback) -> None:
+    if callback_data.action in {"manual", "cancel"}:
+        await callback.answer()
+        return
+
+    try:
+        await callback.answer("Планирую…")
+    except TelegramBadRequest:
+        pass
+
+    scheduled_at = _preset_datetime(callback_data.action)
+    if not scheduled_at:
+        await callback.answer()
+        return
+
+    await _schedule_post(callback, callback_data.post_id, scheduled_at)
+
+
+@router.message(SchedulingStates.waiting_for_schedule_datetime)
+async def save_manual_datetime(message: Message, state: FSMContext) -> None:
+    try:
+        scheduled_at = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M").replace(tzinfo=_settings.timezone)
+    except (TypeError, ValueError):
+        await message.answer(
+            "<b>Неверный формат даты</b>\n\nИспользуй формат <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>.",
+            reply_markup=build_admin_cancel_keyboard(),
+        )
+        return
+
+    if scheduled_at <= _now():
+        await message.answer(
+            "<b>Дата уже прошла</b>\n\nВведи время в будущем.",
+            reply_markup=build_admin_cancel_keyboard(),
+        )
+        return
+
     data = await state.get_data()
-    prompt_message_id = data.get("prompt_message_id")
-    if prompt_message_id:
-        with suppress(TelegramBadRequest):
-            await bot.delete_message(chat_id=chat_id, message_id=prompt_message_id)
-    await state.update_data(prompt_message_id=None)
+    post_id = data.get("post_id")
+    await _database.schedule_post(
+        post_id=post_id,
+        scheduled_at=scheduled_at.isoformat(),
+        scheduled_by=message.from_user.id,
+    )
+    post = await _database.get_submission(post_id)
+    if post:
+        await refresh_moderation_card(message.bot, _settings, post)
+
+    await state.clear()
+    await message.answer(
+        "<b>✅ Публикация запланирована</b>\n\n"
+        f"<b>Дата:</b> {scheduled_at.strftime('%d.%m.%Y %H:%M')}",
+        reply_markup=_main_menu(message.from_user.id),
+    )

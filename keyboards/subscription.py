@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 class SubscriptionCallback(CallbackData, prefix="sub"):
@@ -10,11 +9,20 @@ class SubscriptionCallback(CallbackData, prefix="sub"):
 
 
 def build_subscription_keyboard(channel_url: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📢 Подписаться", url=channel_url)
-    builder.button(
-        text="✅ Проверить подписку",
-        callback_data=SubscriptionCallback(action="check").pack(),
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📢 Подписаться", url=channel_url),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Проверить подписку",
+                    callback_data=SubscriptionCallback(action="check").pack(),
+                )
+            ],
+        ]
     )
-    builder.adjust(1, 1)
-    return builder.as_markup()
+
+
+def get_subscription_keyboard(channel_url: str) -> InlineKeyboardMarkup:
+    return build_subscription_keyboard(channel_url)

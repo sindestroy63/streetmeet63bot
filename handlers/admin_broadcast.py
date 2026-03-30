@@ -1,120 +1,175 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import StateFilter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.filters import Command
+from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from config import Settings
-from database import Database
-from keyboards.admin_menu import (
-    ADMIN_BROADCAST_BUTTON,
-    ADMIN_CANCEL_BUTTON,
-    AdminCallback,
-    build_admin_cancel_keyboard,
-    build_admin_menu_keyboard,
-    build_broadcast_confirm_keyboard,
-)
-from services.broadcast_service import broadcast_to_users
-from states.admin_states import AdminStates
-from utils.permissions import can_use_admin_callbacks, can_use_admin_messages
-from utils.texts import (
-    ADMIN_PANEL_TEXT,
-    BROADCAST_INVALID_TEXT,
-    BROADCAST_START_TEXT,
-    BROADCAST_SUCCESS_TEMPLATE,
-    build_broadcast_preview,
-)
+from keyboards.admin_menu import ADMIN_BROADCAST_BUTTON, ADMIN_CANCEL_BUTTON, build_admin_cancel_keyboard
+from keyboards.user_menu import build_user_menu
+
+router = Router(name="admin_broadcast")
+
+_database = None
+_settings = None
 
 
-def get_router(database: Database, settings: Settings) -> Router:
-    router = Router(name="admin_broadcast")
+class BroadcastStates(StatesGroup):
+    waiting_for_content = State()
+    waiting_for_confirmation = State()
 
-    @router.message(F.text == ADMIN_BROADCAST_BUTTON)
-    async def start_broadcast(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-        await state.clear()
-        await state.set_state(AdminStates.waiting_for_broadcast_content)
-        await message.answer(BROADCAST_START_TEXT, reply_markup=build_admin_cancel_keyboard())
 
-    @router.message(
-        StateFilter(AdminStates.waiting_for_broadcast_content),
-        F.text == ADMIN_CANCEL_BUTTON,
-    )
-    async def cancel_broadcast_input(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-        await state.clear()
-        await message.answer(ADMIN_PANEL_TEXT, reply_markup=build_admin_menu_keyboard())
+class BroadcastCallback(CallbackData, prefix="broadcast"):
+    action: str
 
-    @router.message(StateFilter(AdminStates.waiting_for_broadcast_content), F.photo)
-    async def receive_broadcast_photo(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-        await state.set_state(AdminStates.waiting_for_broadcast_confirm)
-        await state.update_data(
-            broadcast_text=message.caption,
-            broadcast_photo=message.photo[-1].file_id,
-        )
-        await message.answer(
-            build_broadcast_preview(text=message.caption, has_photo=True),
-            reply_markup=build_broadcast_confirm_keyboard(),
-        )
 
-    @router.message(StateFilter(AdminStates.waiting_for_broadcast_content), F.text)
-    async def receive_broadcast_text(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-        await state.set_state(AdminStates.waiting_for_broadcast_confirm)
-        await state.update_data(broadcast_text=message.text, broadcast_photo=None)
-        await message.answer(
-            build_broadcast_preview(text=message.text, has_photo=False),
-            reply_markup=build_broadcast_confirm_keyboard(),
-        )
-
-    @router.message(StateFilter(AdminStates.waiting_for_broadcast_content))
-    async def invalid_broadcast_input(message: Message, state: FSMContext) -> None:
-        if not can_use_admin_messages(message, settings):
-            return
-        await message.answer(BROADCAST_INVALID_TEXT, reply_markup=build_admin_cancel_keyboard())
-
-    @router.callback_query(
-        StateFilter(AdminStates.waiting_for_broadcast_confirm),
-        AdminCallback.filter(),
-    )
-    async def confirm_broadcast(
-        callback: CallbackQuery,
-        callback_data: AdminCallback,
-        state: FSMContext,
-    ) -> None:
-        if not can_use_admin_callbacks(callback, settings):
-            await callback.answer("Недостаточно прав.", show_alert=True)
-            return
-        if callback_data.action not in {"broadcast_send", "broadcast_cancel"}:
-            await callback.answer()
-            return
-
-        if callback_data.action == "broadcast_cancel":
-            await state.clear()
-            await callback.answer("Рассылка отменена.")
-            await callback.message.edit_reply_markup(reply_markup=None)
-            await callback.message.answer(ADMIN_PANEL_TEXT, reply_markup=build_admin_menu_keyboard())
-            return
-
-        data = await state.get_data()
-        result = await broadcast_to_users(
-            database=database,
-            bot=callback.bot,
-            text=data.get("broadcast_text"),
-            photo_file_id=data.get("broadcast_photo"),
-        )
-        await state.clear()
-        await callback.answer("Рассылка отправляется.")
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(
-            BROADCAST_SUCCESS_TEMPLATE.format(success=result.success, failed=result.failed),
-            reply_markup=build_admin_menu_keyboard(),
-        )
-
+def get_router(database=None, settings=None):
+    global _database, _settings
+    if database is not None:
+        _database = database
+    if settings is not None:
+        _settings = settings
     return router
+
+
+def _main_menu(user_id: int):
+    return build_user_menu(is_admin=_settings.is_admin(user_id))
+
+
+def _is_admin(user_id: int) -> bool:
+    return _settings.is_admin(user_id)
+
+
+def _build_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Отправить",
+                    callback_data=BroadcastCallback(action="confirm").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=BroadcastCallback(action="cancel").pack(),
+                )
+            ],
+        ]
+    )
+
+
+async def _send_main_menu(message: Message, state: FSMContext, text: str) -> None:
+    await state.clear()
+    await message.answer(text, reply_markup=_main_menu(message.from_user.id))
+
+
+@router.message(Command("broadcast"))
+@router.message(F.text == ADMIN_BROADCAST_BUTTON)
+async def start_broadcast(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await state.set_state(BroadcastStates.waiting_for_content)
+    await message.answer(
+        "<b>Рассылка</b>\n\nОтправь текст или фото с подписью, которое нужно разослать всем пользователям.",
+        reply_markup=build_admin_cancel_keyboard(),
+    )
+
+
+@router.message(BroadcastStates.waiting_for_content, F.text == ADMIN_CANCEL_BUTTON)
+@router.message(BroadcastStates.waiting_for_confirmation, F.text == ADMIN_CANCEL_BUTTON)
+async def cancel_broadcast_by_button(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+    await _send_main_menu(message, state, "❌ Рассылка отменена")
+
+
+@router.message(BroadcastStates.waiting_for_content)
+async def collect_broadcast_content(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        return
+
+    text = (message.text or message.caption or "").strip()
+    photo_file_id = message.photo[-1].file_id if message.photo else None
+
+    if not text and not photo_file_id:
+        await message.answer("Отправь текст или фото с подписью.", reply_markup=build_admin_cancel_keyboard())
+        return
+
+    await state.update_data(text=text, photo_file_id=photo_file_id)
+    await state.set_state(BroadcastStates.waiting_for_confirmation)
+
+    preview_text = "<b>Проверь рассылку:</b>\n\n" + (text if text else "<i>Фото без текста</i>")
+    if photo_file_id:
+        await message.answer_photo(
+            photo=photo_file_id,
+            caption=preview_text,
+            reply_markup=_build_confirmation_keyboard(),
+        )
+    else:
+        await message.answer(preview_text, reply_markup=_build_confirmation_keyboard())
+
+
+@router.callback_query(BroadcastCallback.filter(F.action == "cancel"))
+async def cancel_broadcast_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+    await callback.message.answer("❌ Рассылка отменена", reply_markup=_main_menu(callback.from_user.id))
+    await callback.answer()
+
+
+@router.callback_query(BroadcastCallback.filter(F.action == "confirm"))
+async def confirm_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+
+    try:
+        await callback.answer("Рассылка запущена")
+    except TelegramBadRequest:
+        pass
+
+    data = await state.get_data()
+    text = data.get("text", "")
+    photo_file_id = data.get("photo_file_id")
+
+    success_count = 0
+    error_count = 0
+
+    for user in await _database.get_all_users():
+        try:
+            if photo_file_id:
+                await callback.bot.send_photo(chat_id=user.telegram_id, photo=photo_file_id, caption=text or None)
+            else:
+                await callback.bot.send_message(chat_id=user.telegram_id, text=text or " ")
+            success_count += 1
+        except TelegramForbiddenError:
+            error_count += 1
+            await _database.mark_user_blocked(user.telegram_id)
+        except TelegramBadRequest:
+            error_count += 1
+        except Exception:
+            error_count += 1
+
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+
+    await callback.message.answer(
+        "<b>✅ Рассылка завершена</b>\n\n"
+        f"<b>Успешно:</b> {success_count}\n"
+        f"<b>Ошибок:</b> {error_count}",
+        reply_markup=_main_menu(callback.from_user.id),
+    )
