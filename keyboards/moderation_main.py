@@ -1,8 +1,15 @@
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from keyboards.schedule_inline import ScheduleCallback
 
-class ModerationCallback(CallbackData, prefix="mod"):
+
+class ModerationCallback(CallbackData, prefix="moderation"):
+    action: str
+    post_id: int
+
+
+class LegacyModerationCallback(CallbackData, prefix="mod"):
     action: str
     post_id: int
 
@@ -20,23 +27,23 @@ def build_moderation_main_keyboard(post) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="✅ Опубликовать",
-                    callback_data=ModerationCallback(action="publish", post_id=post_id).pack(),
+                    callback_data=ModerationCallback(action="publish_post", post_id=post_id).pack(),
                 ),
                 InlineKeyboardButton(
                     text="⏰ Запланировать",
-                    callback_data=ModerationCallback(action="schedule", post_id=post_id).pack(),
+                    callback_data=ScheduleCallback(action="open_menu", post_id=post_id).pack(),
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="❌ Отклонить",
-                    callback_data=ModerationCallback(action="reject", post_id=post_id).pack(),
+                    callback_data=ModerationCallback(action="reject_post", post_id=post_id).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="✏️ Редактировать",
-                    callback_data=ModerationCallback(action="edit_menu", post_id=post_id).pack(),
+                    callback_data=ModerationCallback(action="open_edit_menu", post_id=post_id).pack(),
                 )
             ],
         ]

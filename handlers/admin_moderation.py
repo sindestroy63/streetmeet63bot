@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
+from handlers._fsm_busy_guard import answer_busy_scenario, is_admin_top_level_text, is_top_level_command_text
 from keyboards.moderation_edit import build_moderation_edit_keyboard
 from keyboards.moderation_inline import build_edit_cancel_keyboard
-from keyboards.moderation_main import ModerationCallback, build_moderation_main_keyboard
+from keyboards.moderation_main import LegacyModerationCallback, ModerationCallback, build_moderation_main_keyboard
 from services.moderation_service import (
     clear_signature,
     preview_post,
@@ -22,6 +26,7 @@ from services.moderation_service import (
 )
 
 router = Router(name="admin_moderation")
+logger = logging.getLogger(__name__)
 
 _database = None
 _settings = None
@@ -30,6 +35,12 @@ _settings = None
 class ModerationEditingStates(StatesGroup):
     waiting_for_text = State()
     waiting_for_signature = State()
+
+
+MODERATION_EDITING_STATE_FILTER = StateFilter(
+    ModerationEditingStates.waiting_for_text,
+    ModerationEditingStates.waiting_for_signature,
+)
 
 
 def get_router(database=None, settings=None):
@@ -118,14 +129,16 @@ async def _finish_prompt(message: Message, state: FSMContext, *, post_id: int) -
             pass
 
 
-@router.callback_query(ModerationCallback.filter(F.action == "edit_menu"))
+@router.callback_query(ModerationCallback.filter(F.action == "open_edit_menu"))
+@router.callback_query(LegacyModerationCallback.filter(F.action == "edit_menu"))
 async def open_edit_menu(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
     await _remember_card(callback, callback_data.post_id)
     await _switch_markup(callback, callback_data.post_id, edit_mode=True)
     await _safe_answer(callback)
 
 
-@router.callback_query(ModerationCallback.filter(F.action == "back_main"))
+@router.callback_query(ModerationCallback.filter(F.action == "back_main_menu"))
+@router.callback_query(LegacyModerationCallback.filter(F.action == "back_main"))
 async def back_main(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     data = await state.get_data()
     await _safe_delete(callback.bot, data.get("prompt_chat_id"), data.get("prompt_message_id"))
@@ -159,7 +172,8 @@ async def start_edit_signature(callback: CallbackQuery, callback_data: Moderatio
     )
 
 
-@router.callback_query(ModerationCallback.filter(F.action.in_({"cancel_text", "cancel_signature"})))
+@router.callback_query(ModerationCallback.filter(F.action.in_({"cancel_text_edit", "cancel_signature_edit"})))
+@router.callback_query(LegacyModerationCallback.filter(F.action.in_({"cancel_text", "cancel_signature"})))
 async def cancel_prompt(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     data = await state.get_data()
     await _safe_delete(callback.bot, data.get("prompt_chat_id"), data.get("prompt_message_id"))
@@ -167,6 +181,12 @@ async def cancel_prompt(callback: CallbackQuery, callback_data: ModerationCallba
     await _remember_card(callback, callback_data.post_id)
     await _switch_markup(callback, callback_data.post_id, edit_mode=True)
     await _safe_answer(callback)
+
+
+@router.message(MODERATION_EDITING_STATE_FILTER, F.text.func(is_top_level_command_text))
+@router.message(MODERATION_EDITING_STATE_FILTER, F.text.func(is_admin_top_level_text))
+async def block_top_level_navigation_during_moderation_edit(message: Message) -> None:
+    await answer_busy_scenario(message)
 
 
 @router.message(ModerationEditingStates.waiting_for_text, F.text)
@@ -197,7 +217,8 @@ async def save_signature_prompt(message: Message, state: FSMContext) -> None:
     await _finish_prompt(message, state, post_id=post_id)
 
 
-@router.callback_query(ModerationCallback.filter(F.action.in_({"toggle_anonymous", "anonymous"})))
+@router.callback_query(ModerationCallback.filter(F.action == "toggle_anonymous"))
+@router.callback_query(LegacyModerationCallback.filter(F.action.in_({"toggle_anonymous", "anonymous"})))
 async def toggle_anonymous_callback(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
     await _remember_card(callback, callback_data.post_id)
     await toggle_anonymous(
@@ -214,7 +235,8 @@ async def toggle_anonymous_callback(callback: CallbackQuery, callback_data: Mode
     await _safe_answer(callback, "Анонимность обновлена")
 
 
-@router.callback_query(ModerationCallback.filter(F.action.in_({"clear_signature", "remove_signature"})))
+@router.callback_query(ModerationCallback.filter(F.action == "clear_signature"))
+@router.callback_query(LegacyModerationCallback.filter(F.action.in_({"clear_signature", "remove_signature"})))
 async def clear_signature_callback(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
     await _remember_card(callback, callback_data.post_id)
     await clear_signature(
@@ -231,7 +253,8 @@ async def clear_signature_callback(callback: CallbackQuery, callback_data: Moder
     await _safe_answer(callback, "Подпись убрана")
 
 
-@router.callback_query(ModerationCallback.filter(F.action == "reset"))
+@router.callback_query(ModerationCallback.filter(F.action == "reset_post"))
+@router.callback_query(LegacyModerationCallback.filter(F.action == "reset"))
 async def reset_post_callback(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
     await _remember_card(callback, callback_data.post_id)
     await reset_post(
@@ -248,7 +271,8 @@ async def reset_post_callback(callback: CallbackQuery, callback_data: Moderation
     await _safe_answer(callback, "Заявка сброшена")
 
 
-@router.callback_query(ModerationCallback.filter(F.action == "preview"))
+@router.callback_query(ModerationCallback.filter(F.action == "preview_post"))
+@router.callback_query(LegacyModerationCallback.filter(F.action == "preview"))
 async def preview_callback(callback: CallbackQuery, callback_data: ModerationCallback) -> None:
     await _remember_card(callback, callback_data.post_id)
     await preview_post(
@@ -260,7 +284,8 @@ async def preview_callback(callback: CallbackQuery, callback_data: ModerationCal
     await _safe_answer(callback, "Превью отправлено")
 
 
-@router.callback_query(ModerationCallback.filter(F.action == "publish"))
+@router.callback_query(ModerationCallback.filter(F.action == "publish_post"))
+@router.callback_query(LegacyModerationCallback.filter(F.action == "publish"))
 async def publish_callback(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     await state.clear()
     await _remember_card(callback, callback_data.post_id)
@@ -274,7 +299,8 @@ async def publish_callback(callback: CallbackQuery, callback_data: ModerationCal
     )
 
 
-@router.callback_query(ModerationCallback.filter(F.action == "reject"))
+@router.callback_query(ModerationCallback.filter(F.action == "reject_post"))
+@router.callback_query(LegacyModerationCallback.filter(F.action == "reject"))
 async def reject_callback(callback: CallbackQuery, callback_data: ModerationCallback, state: FSMContext) -> None:
     await state.clear()
     await _remember_card(callback, callback_data.post_id)
@@ -288,6 +314,16 @@ async def reject_callback(callback: CallbackQuery, callback_data: ModerationCall
     )
 
 
-@router.callback_query(ModerationCallback.filter())
-async def moderation_fallback(callback: CallbackQuery) -> None:
+@router.callback_query(LegacyModerationCallback.filter())
+async def legacy_moderation_fallback(callback: CallbackQuery) -> None:
     await _safe_answer(callback, "Кнопка устарела или действие больше недоступно")
+
+
+@router.callback_query(F.data.startswith("moderation:"))
+async def unknown_moderation_callback(callback: CallbackQuery) -> None:
+    logger.warning(
+        "Unknown moderation callback: data=%s user_id=%s",
+        callback.data,
+        getattr(callback.from_user, "id", None),
+    )
+    await _safe_answer(callback, "Действие больше недоступно. Обновите экран.", show_alert=True)

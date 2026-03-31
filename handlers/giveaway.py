@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.types import CallbackQuery, Message
 
 from config import Settings
@@ -41,8 +41,8 @@ def _keyboard():
     )
 
 
-@router.message(Command("giveaway"))
-@router.message(F.text == GIVEAWAY_BUTTON)
+@router.message(StateFilter(None), Command("giveaway"))
+@router.message(StateFilter(None), F.text == GIVEAWAY_BUTTON)
 async def show_giveaway(message: Message) -> None:
     if _settings is None:
         await message.answer("Произошла ошибка. Попробуйте позже.")
@@ -50,7 +50,7 @@ async def show_giveaway(message: Message) -> None:
     await message.answer(GIVEAWAY_TEXT, reply_markup=_keyboard())
 
 
-@router.callback_query(GiveawayCallback.filter(F.action == "join"))
+@router.callback_query(GiveawayCallback.filter(F.action.in_({"join", "join_contest"})))
 async def join_callback(callback: CallbackQuery, bot: Bot) -> None:
     if _database is None or _settings is None or callback.from_user is None:
         await callback.answer("Произошла ошибка. Попробуйте позже.", show_alert=True)
@@ -70,7 +70,7 @@ async def join_callback(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer("✅ Ты участвуешь в розыгрыше", show_alert=True)
 
 
-@router.callback_query(GiveawayCallback.filter(F.action == "check"))
+@router.callback_query(GiveawayCallback.filter(F.action.in_({"check", "check_subscriptions"})))
 async def check_callback(callback: CallbackQuery, bot: Bot) -> None:
     if _settings is None or callback.from_user is None:
         await callback.answer("Произошла ошибка. Попробуйте позже.", show_alert=True)

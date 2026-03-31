@@ -5,7 +5,11 @@ SKIP_BUTTON = "Пропустить"
 CANCEL_BUTTON = "❌ Отмена"
 
 
-class UserSubmissionCallback(CallbackData, prefix="user_submit"):
+class UserSubmissionCallback(CallbackData, prefix="submission"):
+    action: str
+
+
+class LegacyUserSubmissionCallback(CallbackData, prefix="user_submit"):
     action: str
 
 
@@ -32,19 +36,19 @@ def build_publish_mode_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="👤 От моего имени",
-                    callback_data=UserSubmissionCallback(action="mode_author").pack(),
+                    callback_data=UserSubmissionCallback(action="set_mode_author").pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="🙈 Анонимно",
-                    callback_data=UserSubmissionCallback(action="mode_anonymous").pack(),
+                    callback_data=UserSubmissionCallback(action="set_mode_anonymous").pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="❌ Отмена",
-                    callback_data=UserSubmissionCallback(action="cancel").pack(),
+                    callback_data=UserSubmissionCallback(action="cancel_flow").pack(),
                 )
             ],
         ]
@@ -57,19 +61,19 @@ def build_confirmation_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="✅ Отправить",
-                    callback_data=UserSubmissionCallback(action="confirm").pack(),
+                    callback_data=UserSubmissionCallback(action="submit_post").pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="✏️ Изменить",
-                    callback_data=UserSubmissionCallback(action="restart").pack(),
+                    callback_data=UserSubmissionCallback(action="restart_flow").pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="❌ Отмена",
-                    callback_data=UserSubmissionCallback(action="cancel").pack(),
+                    callback_data=UserSubmissionCallback(action="cancel_flow").pack(),
                 )
             ],
         ]

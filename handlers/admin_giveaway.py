@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, StateFilter
 from aiogram.types import CallbackQuery, Message
 
 from config import Settings
 from database import Database
 from keyboards.admin_menu import ADMIN_GIVEAWAY_BUTTON
-from keyboards.giveaway import GiveawayAdminCallback, build_giveaway_admin_keyboard
+from keyboards.giveaway import GiveawayCallback, LegacyGiveawayAdminCallback, build_giveaway_admin_keyboard
 from services.giveaway_service import (
     draw_giveaway_winners,
     get_giveaway_overview,
@@ -37,15 +38,9 @@ def _is_admin(message_or_callback) -> bool:
     )
 
 
-@router.message(Command("giveaway_admin"))
-@router.message(F.text == ADMIN_GIVEAWAY_BUTTON)
-async def open_giveaway_admin(message: Message) -> None:
-    if not _is_admin(message) or _database is None or _settings is None:
-        return
-
-    overview = await get_giveaway_overview(_database, _settings)
+def _build_overview_text(overview: dict) -> str:
     stats = overview["stats"]
-    text = (
+    return (
         "<b>🎁 Розыгрыш</b>\n\n"
         f"<b>Дата розыгрыша:</b> {overview['draw_at'].strftime('%d.%m.%Y %H:%M')}\n"
         f"<b>Победителей:</b> {overview['winners_count']}\n"
@@ -53,10 +48,28 @@ async def open_giveaway_admin(message: Message) -> None:
         f"<b>Победителей выбрано:</b> {stats['winners']}\n"
         f"<b>Статус:</b> {'завершён' if stats['completed'] else 'активен'}"
     )
+
+
+async def _edit_admin_giveaway_screen(callback: CallbackQuery, text: str) -> None:
+    try:
+        await callback.message.edit_text(text, reply_markup=build_giveaway_admin_keyboard())
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=build_giveaway_admin_keyboard())
+
+
+@router.message(StateFilter(None), Command("giveaway_admin"))
+@router.message(StateFilter(None), F.text == ADMIN_GIVEAWAY_BUTTON)
+async def open_giveaway_admin(message: Message) -> None:
+    if not _is_admin(message) or _database is None or _settings is None:
+        return
+
+    overview = await get_giveaway_overview(_database, _settings)
+    text = _build_overview_text(overview)
     await message.answer(text, reply_markup=build_giveaway_admin_keyboard())
 
 
-@router.callback_query(GiveawayAdminCallback.filter(F.action == "participants"))
+@router.callback_query(GiveawayCallback.filter(F.action == "view_participants"))
+@router.callback_query(LegacyGiveawayAdminCallback.filter(F.action == "participants"))
 async def show_participants(callback: CallbackQuery) -> None:
     if not _is_admin(callback) or _database is None:
         await callback.answer("Недостаточно прав.", show_alert=True)
@@ -74,32 +87,47 @@ async def show_participants(callback: CallbackQuery) -> None:
     else:
         lines = "Пока нет участников"
 
-    await callback.message.answer(
+    await _edit_admin_giveaway_screen(
+        callback,
         "<b>📋 Участники</b>\n\n"
         f"<b>Всего:</b> {total}\n\n"
-        f"{lines}"
+        f"{lines}",
     )
     await callback.answer()
 
 
-@router.callback_query(GiveawayAdminCallback.filter(F.action == "stats"))
+@router.callback_query(GiveawayCallback.filter(F.action == "view_stats"))
+@router.callback_query(LegacyGiveawayAdminCallback.filter(F.action == "stats"))
 async def show_giveaway_stats(callback: CallbackQuery) -> None:
     if not _is_admin(callback) or _database is None or _settings is None:
         await callback.answer("Недостаточно прав.", show_alert=True)
         return
 
     stats = await _database.get_giveaway_stats()
-    await callback.message.answer(
+    await _edit_admin_giveaway_screen(
+        callback,
         "<b>📊 Статистика розыгрыша</b>\n\n"
         f"<b>Участников:</b> {stats['total']}\n"
         f"<b>Победителей:</b> {stats['winners']}\n"
         f"<b>Статус:</b> {'завершён' if stats['completed'] else 'активен'}\n"
-        f"<b>Дата розыгрыша:</b> {_settings.giveaway_draw_at.strftime('%d.%m.%Y %H:%M')}"
+        f"<b>Дата розыгрыша:</b> {_settings.giveaway_draw_at.strftime('%d.%m.%Y %H:%M')}",
     )
     await callback.answer()
 
 
-@router.callback_query(GiveawayAdminCallback.filter(F.action == "draw"))
+@router.callback_query(GiveawayCallback.filter(F.action == "view_overview"))
+async def show_giveaway_overview(callback: CallbackQuery) -> None:
+    if not _is_admin(callback) or _database is None or _settings is None:
+        await callback.answer("Недостаточно прав.", show_alert=True)
+        return
+
+    overview = await get_giveaway_overview(_database, _settings)
+    await _edit_admin_giveaway_screen(callback, _build_overview_text(overview))
+    await callback.answer()
+
+
+@router.callback_query(GiveawayCallback.filter(F.action == "draw_winners"))
+@router.callback_query(LegacyGiveawayAdminCallback.filter(F.action == "draw"))
 async def draw_winners(callback: CallbackQuery, bot: Bot) -> None:
     if not _is_admin(callback) or _database is None or _settings is None:
         await callback.answer("Недостаточно прав.", show_alert=True)
@@ -111,4 +139,6 @@ async def draw_winners(callback: CallbackQuery, bot: Bot) -> None:
 
     winners = await draw_giveaway_winners(bot, _database, _settings)
     await notify_admin_about_giveaway_results(bot, _settings, winners)
+    overview = await get_giveaway_overview(_database, _settings)
+    await _edit_admin_giveaway_screen(callback, _build_overview_text(overview))
     await callback.answer("Розыгрыш проведён", show_alert=True)

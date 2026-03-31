@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from aiogram import Bot, F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from config import Settings
 from database import Database
 from keyboards.giveaway import build_giveaway_keyboard
-from keyboards.subscription import SubscriptionCallback, build_subscription_keyboard
+from keyboards.subscription import LegacySubscriptionCallback, SubscriptionCallback, build_subscription_keyboard
 from keyboards.user_menu import HOW_IT_WORKS_BUTTON, build_user_menu
 from services.user_service import notify_about_new_user, register_user, sync_subscription_status
 
@@ -143,16 +143,15 @@ async def start_command(
     await _send_start_menu(message=message, settings=_settings)
 
 
-@router.message(F.text == HOW_IT_WORKS_BUTTON)
+@router.message(StateFilter(None), F.text == HOW_IT_WORKS_BUTTON)
 async def how_it_works(
     message: Message,
-    state: FSMContext,
 ) -> None:
-    await state.clear()
     await message.answer(HOW_IT_WORKS_TEXT)
 
 
-@router.callback_query(SubscriptionCallback.filter(F.action == "check"))
+@router.callback_query(SubscriptionCallback.filter(F.action == "check_subscription"))
+@router.callback_query(LegacySubscriptionCallback.filter(F.action == "check"))
 async def check_subscription_callback(
     callback: CallbackQuery,
     bot: Bot,

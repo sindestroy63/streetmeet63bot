@@ -33,7 +33,7 @@ def build_moderation_edit_keyboard(post) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="⬅️ Назад",
-                    callback_data=ModerationCallback(action="back_main", post_id=post_id).pack(),
+                    callback_data=ModerationCallback(action="back_main_menu", post_id=post_id).pack(),
                 )
             ],
         ]

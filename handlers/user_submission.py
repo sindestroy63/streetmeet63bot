@@ -3,14 +3,17 @@ from __future__ import annotations
 import html
 
 from aiogram import F, Router
+from aiogram.filters import StateFilter
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from handlers._fsm_busy_guard import answer_busy_scenario, is_top_level_command_text, is_user_top_level_text
 from keyboards.admin_menu import ADMIN_CANCEL_BUTTON, ADMIN_CLOSE_BUTTON
 from keyboards.subscription import build_subscription_keyboard
 from keyboards.user_flow import (
     CANCEL_BUTTON,
+    LegacyUserSubmissionCallback,
     SKIP_BUTTON,
     UserSubmissionCallback,
     build_caption_step_keyboard,
@@ -34,6 +37,12 @@ CAPTION_STEP_TEXT = "<b>Шаг 2 из 3 — подпись</b>\n\nОтправь
 PUBLISH_MODE_TEXT = "<b>Шаг 3 из 3 — формат публикации</b>\n\nВыбери, как опубликовать пост 👇"
 SUCCESS_TEXT = "<b>✅ Предложка отправлена</b>\n\n<i>Мы передали её на модерацию</i>"
 CANCEL_TEXT = "❌ Отправка отменена"
+SUBMISSION_STATE_FILTER = StateFilter(
+    SubmissionStates.waiting_for_photo,
+    SubmissionStates.waiting_for_caption,
+    SubmissionStates.waiting_for_publish_mode,
+    SubmissionStates.waiting_for_confirmation,
+)
 
 
 def get_router(database=None, settings=None):
@@ -162,9 +171,14 @@ async def start_submission(message: Message, state: FSMContext) -> None:
     await _send_media_step(message, state)
 
 
-@router.message(F.text.in_({CANCEL_BUTTON, ADMIN_CANCEL_BUTTON, ADMIN_CLOSE_BUTTON}))
+@router.message(SUBMISSION_STATE_FILTER, F.text.in_({CANCEL_BUTTON, ADMIN_CANCEL_BUTTON, ADMIN_CLOSE_BUTTON}))
 async def cancel_any_flow(message: Message, state: FSMContext) -> None:
     await _send_main_menu(message, state)
+
+
+@router.message(SUBMISSION_STATE_FILTER, F.text.func(is_top_level_command_text))
+async def block_top_level_commands_during_submission(message: Message) -> None:
+    await answer_busy_scenario(message)
 
 
 @router.message(SubmissionStates.waiting_for_photo, F.photo | F.video)
@@ -240,7 +254,8 @@ async def invalid_caption(message: Message, state: FSMContext) -> None:
     await _send_caption_step(message, state)
 
 
-@router.callback_query(UserSubmissionCallback.filter(F.action == "mode_author"))
+@router.callback_query(UserSubmissionCallback.filter(F.action == "set_mode_author"))
+@router.callback_query(LegacyUserSubmissionCallback.filter(F.action == "mode_author"))
 async def choose_author_mode(callback: CallbackQuery, state: FSMContext) -> None:
     current_state = await state.get_state()
     if current_state != SubmissionStates.waiting_for_publish_mode.state:
@@ -251,7 +266,8 @@ async def choose_author_mode(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@router.callback_query(UserSubmissionCallback.filter(F.action == "mode_anonymous"))
+@router.callback_query(UserSubmissionCallback.filter(F.action == "set_mode_anonymous"))
+@router.callback_query(LegacyUserSubmissionCallback.filter(F.action == "mode_anonymous"))
 async def choose_anonymous_mode(callback: CallbackQuery, state: FSMContext) -> None:
     current_state = await state.get_state()
     if current_state != SubmissionStates.waiting_for_publish_mode.state:
@@ -262,7 +278,8 @@ async def choose_anonymous_mode(callback: CallbackQuery, state: FSMContext) -> N
     await callback.answer()
 
 
-@router.callback_query(UserSubmissionCallback.filter(F.action == "restart"))
+@router.callback_query(UserSubmissionCallback.filter(F.action == "restart_flow"))
+@router.callback_query(LegacyUserSubmissionCallback.filter(F.action == "restart"))
 async def restart_submission(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SubmissionStates.waiting_for_photo)
@@ -271,7 +288,8 @@ async def restart_submission(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@router.callback_query(UserSubmissionCallback.filter(F.action == "cancel"))
+@router.callback_query(UserSubmissionCallback.filter(F.action == "cancel_flow"))
+@router.callback_query(LegacyUserSubmissionCallback.filter(F.action == "cancel"))
 async def cancel_submission_callback(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     try:
@@ -282,7 +300,8 @@ async def cancel_submission_callback(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
 
 
-@router.callback_query(UserSubmissionCallback.filter(F.action == "confirm"))
+@router.callback_query(UserSubmissionCallback.filter(F.action == "submit_post"))
+@router.callback_query(LegacyUserSubmissionCallback.filter(F.action == "confirm"))
 async def confirm_submission(callback: CallbackQuery, state: FSMContext) -> None:
     if await state.get_state() != SubmissionStates.waiting_for_confirmation.state:
         await callback.answer()
@@ -321,6 +340,14 @@ async def confirm_submission(callback: CallbackQuery, state: FSMContext) -> None
         pass
 
     await callback.message.answer(SUCCESS_TEXT, reply_markup=_main_menu(callback.from_user.id))
+
+
+@router.message(
+    StateFilter(SubmissionStates.waiting_for_publish_mode, SubmissionStates.waiting_for_confirmation),
+    F.text.func(is_user_top_level_text),
+)
+async def block_top_level_texts_during_submission_inline_steps(message: Message) -> None:
+    await answer_busy_scenario(message)
 
 
 @router.message(SubmissionStates.waiting_for_publish_mode)

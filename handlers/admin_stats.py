@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
+from aiogram.filters import StateFilter
 from aiogram.types import Message
 
 from config import Settings
@@ -27,7 +28,7 @@ def _is_admin(message: Message) -> bool:
     return bool(_settings and message.from_user and _settings.is_admin(message.from_user.id))
 
 
-@router.message(F.text == ADMIN_USERS_BUTTON)
+@router.message(StateFilter(None), F.text == ADMIN_USERS_BUTTON)
 async def show_users_stats(message: Message) -> None:
     if not _is_admin(message) or _database is None:
         return
@@ -41,7 +42,7 @@ async def show_users_stats(message: Message) -> None:
     )
 
 
-@router.message(F.text == ADMIN_STATS_BUTTON)
+@router.message(StateFilter(None), F.text == ADMIN_STATS_BUTTON)
 async def show_bot_stats(message: Message) -> None:
     if not _is_admin(message) or _database is None:
         return

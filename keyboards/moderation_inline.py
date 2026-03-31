@@ -8,7 +8,7 @@ def build_moderation_keyboard(post) -> InlineKeyboardMarkup:
 
 
 def build_edit_cancel_keyboard(post_id: int, field_name: str) -> InlineKeyboardMarkup:
-    action = "cancel_text" if field_name == "text" else "cancel_signature"
+    action = "cancel_text_edit" if field_name == "text" else "cancel_signature_edit"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [

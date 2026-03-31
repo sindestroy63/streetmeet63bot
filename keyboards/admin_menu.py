@@ -12,7 +12,7 @@ from aiogram.types import (
 ADMIN_BROADCAST_BUTTON = "📢 Рассылка"
 ADMIN_USERS_BUTTON = "👥 Пользователи"
 ADMIN_STATS_BUTTON = "📊 Статистика"
-ADMIN_GIVEAWAY_BUTTON = "🎁 Розыгрыш"
+ADMIN_GIVEAWAY_BUTTON = "🎁 Розыгрыш (админ)"
 ADMIN_CLOSE_BUTTON = "❌ Закрыть"
 ADMIN_CANCEL_BUTTON = "❌ Отмена"
 ADMIN_PANEL_BUTTON = "⚙️ Админка"
@@ -56,7 +56,7 @@ def build_admin_inline_close_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text=ADMIN_CLOSE_BUTTON,
-                    callback_data=AdminCallback(action="close").pack(),
+                    callback_data=AdminCallback(action="close_panel").pack(),
                 )
             ]
         ]

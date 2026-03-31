@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from keyboards.admin_menu import ADMIN_BROADCAST_BUTTON, ADMIN_CANCEL_BUTTON, build_admin_cancel_keyboard
-from keyboards.user_menu import build_user_menu
+from handlers._fsm_busy_guard import answer_busy_scenario, is_admin_top_level_text, is_top_level_command_text
+from keyboards.admin_menu import ADMIN_BROADCAST_BUTTON, ADMIN_CANCEL_BUTTON, build_admin_cancel_keyboard, build_admin_menu
 
 router = Router(name="admin_broadcast")
 
@@ -36,7 +36,7 @@ def get_router(database=None, settings=None):
 
 
 def _main_menu(user_id: int):
-    return build_user_menu(is_admin=_settings.is_admin(user_id))
+    return build_admin_menu()
 
 
 def _is_admin(user_id: int) -> bool:
@@ -49,13 +49,13 @@ def _build_confirmation_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="✅ Отправить",
-                    callback_data=BroadcastCallback(action="confirm").pack(),
+                    callback_data=BroadcastCallback(action="send_confirm").pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="❌ Отмена",
-                    callback_data=BroadcastCallback(action="cancel").pack(),
+                    callback_data=BroadcastCallback(action="cancel_flow").pack(),
                 )
             ],
         ]
@@ -67,8 +67,17 @@ async def _send_main_menu(message: Message, state: FSMContext, text: str) -> Non
     await message.answer(text, reply_markup=_main_menu(message.from_user.id))
 
 
-@router.message(Command("broadcast"))
-@router.message(F.text == ADMIN_BROADCAST_BUTTON)
+async def _send_main_menu_from_callback(callback: CallbackQuery, state: FSMContext, text: str) -> None:
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+    await callback.message.answer(text, reply_markup=_main_menu(callback.from_user.id))
+
+
+@router.message(StateFilter(None), Command("broadcast"))
+@router.message(StateFilter(None), F.text == ADMIN_BROADCAST_BUTTON)
 async def start_broadcast(message: Message, state: FSMContext) -> None:
     if not _is_admin(message.from_user.id):
         return
@@ -86,6 +95,13 @@ async def cancel_broadcast_by_button(message: Message, state: FSMContext) -> Non
     if not _is_admin(message.from_user.id):
         return
     await _send_main_menu(message, state, "❌ Рассылка отменена")
+
+
+@router.message(BroadcastStates.waiting_for_content, F.text.func(is_top_level_command_text))
+@router.message(BroadcastStates.waiting_for_confirmation, F.text.func(is_top_level_command_text))
+@router.message(BroadcastStates.waiting_for_confirmation, F.text.func(is_admin_top_level_text))
+async def block_top_level_navigation_during_broadcast(message: Message) -> None:
+    await answer_busy_scenario(message)
 
 
 @router.message(BroadcastStates.waiting_for_content)
@@ -114,21 +130,16 @@ async def collect_broadcast_content(message: Message, state: FSMContext) -> None
         await message.answer(preview_text, reply_markup=_build_confirmation_keyboard())
 
 
-@router.callback_query(BroadcastCallback.filter(F.action == "cancel"))
+@router.callback_query(BroadcastCallback.filter(F.action.in_({"cancel", "cancel_flow"})))
 async def cancel_broadcast_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer()
         return
-    await state.clear()
-    try:
-        await callback.message.delete()
-    except TelegramBadRequest:
-        pass
-    await callback.message.answer("❌ Рассылка отменена", reply_markup=_main_menu(callback.from_user.id))
+    await _send_main_menu_from_callback(callback, state, "❌ Рассылка отменена")
     await callback.answer()
 
 
-@router.callback_query(BroadcastCallback.filter(F.action == "confirm"))
+@router.callback_query(BroadcastCallback.filter(F.action.in_({"confirm", "send_confirm"})))
 async def confirm_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     if not _is_admin(callback.from_user.id):
         await callback.answer()
@@ -161,15 +172,10 @@ async def confirm_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
         except Exception:
             error_count += 1
 
-    await state.clear()
-    try:
-        await callback.message.delete()
-    except TelegramBadRequest:
-        pass
-
-    await callback.message.answer(
+    await _send_main_menu_from_callback(
+        callback,
+        state,
         "<b>✅ Рассылка завершена</b>\n\n"
         f"<b>Успешно:</b> {success_count}\n"
         f"<b>Ошибок:</b> {error_count}",
-        reply_markup=_main_menu(callback.from_user.id),
     )
